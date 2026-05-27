@@ -374,72 +374,78 @@ async function advanceQueue(reason = 'auto') {
 
 let lastKnownSpotifyId = null;
 let nearEndTriggered   = false;
+let wasPlaying         = false; // ← novo
 
 async function monitorPlayback() {
   try {
     const r = await spotify('get', '/me/player/currently-playing');
 
-    // 204 = nada tocando
     if (r.status === 204 || !r.data?.item) {
-  // Se havia uma música tocando, avança a fila automaticamente
-  if (lastKnownSpotifyId) {
-    const { data: state } = await supabase
-      .from('player_state')
-      .select('current_spotify_id, is_playing')
-      .eq('id', 1).single();
-
-    if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
-      console.log('🎵 Música terminou — avançando fila...');
-      await advanceQueue('auto');
+      if (lastKnownSpotifyId) {
+        const { data: state } = await supabase
+          .from('player_state').select('current_spotify_id').eq('id', 1).single();
+        if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
+          console.log('🎵 Playback parou (204) — avançando fila...');
+          await advanceQueue('auto');
+        }
+      }
+      lastKnownSpotifyId = null;
+      nearEndTriggered   = false;
+      wasPlaying         = false;
+      return;
     }
-  }
-  lastKnownSpotifyId = null;
-  nearEndTriggered   = false;
-  return;
-  }
 
     const { item, progress_ms, is_playing } = r.data;
-    if (!is_playing) return;
-
     const spotifyId = item.id;
     const remaining = item.duration_ms - progress_ms;
 
-    // Pega o que WE sabemos que está tocando
-    const { data: state } = await supabase
-      .from('player_state')
-      .select('current_spotify_id, is_playing')
-      .eq('id', 1).single();
+    // ── Detecta música que parou naturalmente (is_playing virou false) ──
+    if (!is_playing) {
+      if (wasPlaying && lastKnownSpotifyId === spotifyId && remaining < 8000) {
+        const { data: state } = await supabase
+          .from('player_state').select('current_spotify_id').eq('id', 1).single();
+        if (state?.current_spotify_id === spotifyId) {
+          console.log('🎵 Música terminou naturalmente — avançando fila...');
+          await advanceQueue('auto');
+          lastKnownSpotifyId = null;
+          nearEndTriggered   = false;
+          wasPlaying         = false;
+        }
+      } else {
+        wasPlaying = false;
+      }
+      return;
+    }
 
-    // ── Mudança de faixa ──────────────────────────────────
-    // Spotify mudou para outra música (fim natural ou skip no dispositivo)
+    wasPlaying = true;
+
+    const { data: state } = await supabase
+      .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
+
+    // ── Mudança de faixa (skip no dispositivo) ──
     if (lastKnownSpotifyId && lastKnownSpotifyId !== spotifyId) {
       if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
-        // Era a nossa música que acabou → avança fila
         await advanceQueue('auto');
         nearEndTriggered = false;
       }
     }
     lastKnownSpotifyId = spotifyId;
 
-    // ── Pré-transição nos últimos 8 segundos ──────────────
-    // Chama próxima música antes de acabar para reduzir gap
+    // ── Pré-transição nos últimos 8 segundos ──
     if (remaining < 8000 && remaining > 500 && !nearEndTriggered) {
       if (state?.current_spotify_id === spotifyId) {
         const next = await getNextSong();
         if (next) {
           nearEndTriggered = true;
           console.log(`⏳ ${Math.round(remaining / 1000)}s restantes — preparando: ${next.title}`);
-          // Aguarda a faixa terminar naturalmente (detected pela mudança de ID no próximo poll)
         }
       }
     }
 
-    // Reset trigger se ainda temos tempo
     if (remaining > 15000) nearEndTriggered = false;
 
   } catch (err) {
     const status = err.response?.status;
-    // Ignora erros esperados
     if (status && [401, 404, 429].includes(status)) return;
     console.error('⚠️  Monitor:', err.response?.data?.error?.message || err.message);
   }
