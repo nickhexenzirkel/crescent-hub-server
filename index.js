@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════
-// CRESCENT HUB — Festival Music Server
-// Node.js + Express + Spotify Web API + Supabase
+// CRESCENT HUB — Server completo
+// Spotify + Auth + Alexa TTS + Lembretes programados
 // ════════════════════════════════════════════════════════
 
 const express  = require('express');
@@ -8,13 +8,13 @@ const cors     = require('cors');
 const axios    = require('axios');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
+const cron     = require('node-cron');
+const AlexaRemote = require('alexa-remote2');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
-
-
 app.use(cors());
 app.use(express.json());
 
@@ -32,6 +32,92 @@ const maskCpf = (v) => {
   const d = normCpf(v);
   return d.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
 };
+
+// ════════════════════════════════════════════════════════
+// ALEXA REMOTE — TTS e anúncios no Echo Dot
+// ════════════════════════════════════════════════════════
+
+const SOUNDS = {
+  fanfarra:    'soundbank://soundlibrary/musical/amzn_sfx_trumpet_fanfare_01',
+  campainha:   'soundbank://soundlibrary/home/amzn_sfx_doorbell_01',
+  aplauso:     'soundbank://soundlibrary/human/amzn_sfx_crowd_applause_01',
+  corneta:     'soundbank://soundlibrary/musical/amzn_sfx_horn_01',
+  notificacao: 'soundbank://soundlibrary/computers/amzn_sfx_ui_notification_01',
+};
+
+let alexa        = null;
+let alexaOk      = false;
+let alexaDevices = [];
+
+function initAlexa() {
+  if (!process.env.AMAZON_EMAIL || !process.env.AMAZON_PASSWORD) {
+    console.log('⚠️  Alexa: configure AMAZON_EMAIL e AMAZON_PASSWORD no .env do Render');
+    return;
+  }
+  alexa = new AlexaRemote();
+  alexa.init({
+    email:            process.env.AMAZON_EMAIL,
+    password:         process.env.AMAZON_PASSWORD,
+    alexaServiceHost: 'alexa.amazon.com',
+    listeningPort:    0,
+    useWsMqtt:        false,
+    logger:           false,
+  }, (err) => {
+    if (err) { console.error('❌ Alexa init:', err.message); return; }
+    alexaOk = true;
+    console.log('🔊 Alexa Remote conectada!');
+    alexa.getDevices((e, data) => {
+      if (!e && data?.devices) {
+        alexaDevices = data.devices;
+        console.log(`🔊 ${alexaDevices.length} dispositivo(s) Alexa encontrado(s):`);
+        alexaDevices.forEach(d => console.log(`   • ${d.accountName} (${d.deviceFamily})`));
+      }
+    });
+  });
+}
+initAlexa();
+
+async function speakOnAlexa(text, opts = {}) {
+  if (!alexa || !alexaOk) throw new Error('Alexa não inicializada. Configure AMAZON_EMAIL e AMAZON_PASSWORD no Render.');
+  const serial = opts.device
+    || process.env.ALEXA_DEVICE_SERIAL
+    || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
+  if (!serial) throw new Error('Nenhum dispositivo Echo encontrado. Configure ALEXA_DEVICE_SERIAL no Render.');
+  const soundTag = opts.sound && SOUNDS[opts.sound] ? `<audio src="${SOUNDS[opts.sound]}"/><break time="800ms"/>` : '';
+  const ssml = `<speak>${soundTag}${text}</speak>`;
+  return new Promise((resolve, reject) => {
+    alexa.sendSequenceCommand(serial, 'speak', ssml, (err) => {
+      if (err) reject(err); else resolve();
+    });
+  });
+}
+
+// ── Cron: verifica lembretes a cada minuto (horário de Brasília) ──
+cron.schedule('* * * * *', async () => {
+  try {
+    const brt   = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const hhmm  = `${String(brt.getHours()).padStart(2,'0')}:${String(brt.getMinutes()).padStart(2,'0')}`;
+    const today = brt.toISOString().split('T')[0];
+    const { data: reminders } = await supabase
+      .from('reminders').select('*').eq('active', true).eq('time', hhmm).neq('last_triggered', today);
+    for (const r of (reminders || [])) {
+      const rDate = r.date ? new Date(r.date + 'T12:00:00') : null;
+      const shouldFire =
+        r.repeat === 'daily' ||
+        (r.repeat === 'weekly'  && rDate && rDate.getDay()  === brt.getDay()) ||
+        (r.repeat === 'monthly' && rDate && rDate.getDate() === brt.getDate()) ||
+        (r.repeat === 'never'   && r.date === today);
+      if (!shouldFire) continue;
+      console.log(`🔔 "${r.title}" — ${hhmm} — disparando Alexa...`);
+      try {
+        await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
+        await supabase.from('reminders').update({ last_triggered: today }).eq('id', r.id);
+        console.log(`✅ Alexa anunciou: "${r.title}"`);
+      } catch (e) { console.error(`❌ Falha ao anunciar "${r.title}":`, e.message); }
+    }
+  } catch (e) { console.error('⚠️  Cron:', e.message); }
+});
+console.log('⏰ Cron de lembretes iniciado (verifica a cada minuto)');
 
 // ── Middlewares de autenticação ───────────────────────────
 function requireAuth(req, res, next) {
@@ -286,6 +372,35 @@ const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 3;
 let tokens = { access: null, refresh: null, expiresAt: 0 };
 
 // ═══════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════
+// ALEXA — Endpoints
+// ════════════════════════════════════════════════════════
+
+app.get('/api/alexa/status', (req, res) => {
+  res.json({ ok: alexaOk, configured: !!(process.env.AMAZON_EMAIL && process.env.AMAZON_PASSWORD) });
+});
+
+app.get('/api/alexa/devices', requireAuth, (req, res) => {
+  if (!alexaOk) return res.json({ ok: false, devices: [], msg: 'Alexa não configurada' });
+  alexa.getDevices((err, data) => {
+    if (err) return res.json({ ok: false, devices: [], msg: err.message });
+    alexaDevices = data?.devices || [];
+    res.json({ ok: true, devices: alexaDevices.map(d => ({ serial: d.serialNumber, name: d.accountName, type: d.deviceFamily })) });
+  });
+});
+
+// Testar anúncio imediatamente (admin)
+app.post('/api/alexa/speak', requireAdmin, async (req, res) => {
+  const { text, sound, device } = req.body;
+  if (!text) return res.status(400).json({ error: 'Texto obrigatório' });
+  try {
+    await speakOnAlexa(text, { sound, device });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Proxy de imagem — resolve CORS para extração de cores via Canvas
 app.get('/api/image-proxy', async (req, res) => {
   const { url } = req.query;
