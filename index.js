@@ -189,6 +189,9 @@ app.post('/api/employees/:id/salary-history', requireAdmin, async (req, res) => 
   if (error) return res.status(500).json({ error: error.message });
   res.json({ record: data });
 });
+
+// Buscar perfil completo de um funcionário (admin)
+app.get('/api/employees/:id', requireAdmin, async (req, res) => {
   const { data, error } = await supabase.from('employees').select('*').eq('id', req.params.id).single();
   if (error) return res.status(500).json({ error: error.message });
   const { password_hash, ...safe } = data;
