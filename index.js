@@ -216,6 +216,19 @@ const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 3;
 let tokens = { access: null, refresh: null, expiresAt: 0 };
 
 // ═══════════════════════════════════════════════════════
+// Proxy de imagem — resolve CORS para extração de cores via Canvas
+app.get('/api/image-proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('URL required');
+  try {
+    const r = await axios.get(decodeURIComponent(url), { responseType: 'stream' });
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', r.headers['content-type'] || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    r.data.pipe(res);
+  } catch { res.status(500).send('proxy error'); }
+});
+
 // SPOTIFY AUTH
 // ═══════════════════════════════════════════════════════
 
