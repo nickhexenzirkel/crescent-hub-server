@@ -187,6 +187,36 @@ app.post('/api/queue', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   console.log(`➕ Queue: ${title} por ${requested_by} (pos ${position})`);
+
+  // ── Auto-start: se é a primeira música e nada está tocando ──
+  if (position === 0) {
+    try {
+      const { data: playerState } = await supabase
+        .from('player_state').select('is_playing').eq('id', 1).single();
+
+      if (!playerState || !playerState.is_playing) {
+        // Se não tem dispositivo salvo, tenta pegar o primeiro disponível
+        const { data: devSetting } = await supabase
+          .from('settings').select('value').eq('key', 'device_id').single();
+
+        if (!devSetting?.value) {
+          const devR = await spotify('get', '/me/player/devices');
+          const devices = devR.data?.devices || [];
+          if (devices.length > 0) {
+            await supabase.from('settings').upsert({ key: 'device_id', value: devices[0].id });
+            console.log(`🔊 Dispositivo auto-selecionado: ${devices[0].name}`);
+          }
+        }
+
+        await startPlaying(data);
+        console.log('▶️  Auto-start: tocando primeira música da fila');
+      }
+    } catch (err) {
+      console.error('⚠️  Auto-start falhou:', err.response?.data || err.message);
+      // Não falha o request — música continua na fila para play manual
+    }
+  }
+
   res.json({ song: data });
 });
 
