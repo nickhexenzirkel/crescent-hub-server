@@ -395,20 +395,27 @@ app.post('/api/queue', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   console.log(`➕ Queue: ${title} por ${requested_by} (pos ${position})`);
 
-  // ── Auto-start: se é a primeira música e nada está tocando ──
-  if (position === 0) {
-    try {
-      const { data: playerState } = await supabase
-        .from('player_state').select('is_playing').eq('id', 1).single();
+  // ── Auto-start: dispara sempre que a fila estava vazia ──────
+  // Verifica se esta é a única música pendente (fila estava vazia antes)
+  try {
+    const { count: pendingCount } = await supabase
+      .from('queue').select('id', { count: 'exact', head: true }).eq('status', 'pending');
 
-      if (!playerState || !playerState.is_playing) {
-        // Se não tem dispositivo salvo, tenta pegar o primeiro disponível
+    if (pendingCount === 1) {
+      // Fila estava vazia — verifica se o player está parado
+      const { data: playerState } = await supabase
+        .from('player_state').select('is_playing, current_song_id').eq('id', 1).single();
+
+      const somethingPlaying = playerState?.is_playing && playerState?.current_song_id;
+
+      if (!somethingPlaying) {
+        // Auto-seleciona dispositivo se nenhum estiver salvo
         const { data: devSetting } = await supabase
           .from('settings').select('value').eq('key', 'device_id').single();
 
         if (!devSetting?.value) {
-          const devR = await spotify('get', '/me/player/devices');
-          const devices = devR.data?.devices || [];
+          const devR = await spotify('get', '/me/player/devices').catch(() => null);
+          const devices = devR?.data?.devices || [];
           if (devices.length > 0) {
             await supabase.from('settings').upsert({ key: 'device_id', value: devices[0].id });
             console.log(`🔊 Dispositivo auto-selecionado: ${devices[0].name}`);
@@ -416,12 +423,12 @@ app.post('/api/queue', async (req, res) => {
         }
 
         await startPlaying(data);
-        console.log('▶️  Auto-start: tocando primeira música da fila');
+        console.log(`▶️  Auto-start: "${title}" — fila estava vazia`);
       }
-    } catch (err) {
-      console.error('⚠️  Auto-start falhou:', err.response?.data || err.message);
-      // Não falha o request — música continua na fila para play manual
     }
+  } catch (err) {
+    // Não falha o request — música fica na fila para play manual
+    console.error('⚠️  Auto-start falhou:', err.response?.data?.error?.message || err.message);
   }
 
   res.json({ song: data });
