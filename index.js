@@ -144,6 +144,68 @@ app.put('/api/employees/:id/password', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Buscar perfil completo de um funcionário
+app.get('/api/employees/:id', requireAdmin, async (req, res) => {
+  const { data, error } = await supabase.from('employees').select('*').eq('id', req.params.id).single();
+  if (error) return res.status(500).json({ error: error.message });
+  const { password_hash, ...safe } = data;
+  res.json({ employee: { ...safe, cpf: maskCpf(safe.cpf) } });
+});
+
+// Atualizar perfil completo (admin pode editar todos os campos)
+app.put('/api/employees/:id/profile', requireAdmin, async (req, res) => {
+  const allowed = ['name','role','active','rg','birth_date','email','phone','street','district',
+    'city','state','cep','category','cargo','admission','salary','inss','ir','vt','va','dependents'];
+  const u = { updated_at: new Date().toISOString() };
+  allowed.forEach(k => { if (req.body[k] !== undefined) u[k] = req.body[k]; });
+  const { data, error } = await supabase.from('employees').update(u).eq('id', req.params.id).select('*').single();
+  if (error) return res.status(500).json({ error: error.message });
+  const { password_hash, ...safe } = data;
+  res.json({ employee: { ...safe, cpf: maskCpf(safe.cpf) } });
+});
+
+// ════════════════════════════════════════════════════════
+// CALENDÁRIO DE EVENTOS
+// ════════════════════════════════════════════════════════
+
+app.get('/api/events', async (req, res) => {
+  const { data, error } = await supabase
+    .from('calendar_events').select('*').order('event_date', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ events: data });
+});
+
+app.post('/api/events', requireAdmin, async (req, res) => {
+  const { title, event_date, event_time, type, description } = req.body;
+  if (!title || !event_date) return res.status(400).json({ error: 'Título e data obrigatórios' });
+  const auth = req.user;
+  const { data, error } = await supabase.from('calendar_events')
+    .insert({ title, event_date, event_time: event_time||'Dia todo', type: type||'Evento', description, created_by: auth.name })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  console.log(`📅 Evento criado: ${title} em ${event_date}`);
+  res.json({ event: data });
+});
+
+app.put('/api/events/:id', requireAdmin, async (req, res) => {
+  const { title, event_date, event_time, type, description } = req.body;
+  const u = { updated_at: new Date().toISOString() };
+  if (title       !== undefined) u.title       = title;
+  if (event_date  !== undefined) u.event_date  = event_date;
+  if (event_time  !== undefined) u.event_time  = event_time;
+  if (type        !== undefined) u.type        = type;
+  if (description !== undefined) u.description = description;
+  const { data, error } = await supabase.from('calendar_events').update(u).eq('id', req.params.id).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ event: data });
+});
+
+app.delete('/api/events/:id', requireAdmin, async (req, res) => {
+  const { error } = await supabase.from('calendar_events').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
 // ─── Spotify config ──────────────────────────────────────
 const CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
