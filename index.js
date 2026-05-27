@@ -381,10 +381,22 @@ async function monitorPlayback() {
 
     // 204 = nada tocando
     if (r.status === 204 || !r.data?.item) {
-      lastKnownSpotifyId = null;
-      nearEndTriggered   = false;
-      return;
+  // Se havia uma música tocando, avança a fila automaticamente
+  if (lastKnownSpotifyId) {
+    const { data: state } = await supabase
+      .from('player_state')
+      .select('current_spotify_id, is_playing')
+      .eq('id', 1).single();
+
+    if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
+      console.log('🎵 Música terminou — avançando fila...');
+      await advanceQueue('auto');
     }
+  }
+  lastKnownSpotifyId = null;
+  nearEndTriggered   = false;
+  return;
+  }
 
     const { item, progress_ms, is_playing } = r.data;
     if (!is_playing) return;
