@@ -153,8 +153,42 @@ app.put('/api/employees/:id/password', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Buscar perfil completo de um funcionário
-app.get('/api/employees/:id', requireAdmin, async (req, res) => {
+// Histórico salarial do usuário logado
+app.get('/api/auth/salary-history', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('salary_history')
+    .select('*')
+    .eq('employee_id', req.user.id)
+    .order('created_at', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ history: data || [] });
+});
+
+// Histórico salarial de um funcionário (admin)
+app.get('/api/employees/:id/salary-history', requireAdmin, async (req, res) => {
+  const { data, error } = await supabase
+    .from('salary_history').select('*').eq('employee_id', req.params.id)
+    .order('created_at', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ history: data || [] });
+});
+
+// Adicionar registro manual de histórico salarial
+app.post('/api/employees/:id/salary-history', requireAdmin, async (req, res) => {
+  const { salary, event, date } = req.body;
+  if (!salary) return res.status(400).json({ error: 'Salário obrigatório' });
+  const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  const now = new Date();
+  const dateStr = date || `${months[now.getMonth()]}/${String(now.getFullYear()).slice(2)}`;
+  const { data, error } = await supabase.from('salary_history').insert({
+    employee_id: req.params.id,
+    date: dateStr, salary: Number(salary),
+    event: event || 'Atualização de salário',
+    created_by: req.user.name,
+  }).select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ record: data });
+});
   const { data, error } = await supabase.from('employees').select('*').eq('id', req.params.id).single();
   if (error) return res.status(500).json({ error: error.message });
   const { password_hash, ...safe } = data;
@@ -167,6 +201,30 @@ app.put('/api/employees/:id/profile', requireAdmin, async (req, res) => {
     'city','state','cep','category','cargo','admission','salary','inss','ir','vt','va','dependents'];
   const u = { updated_at: new Date().toISOString() };
   allowed.forEach(k => { if (req.body[k] !== undefined) u[k] = req.body[k]; });
+
+  // Se o salário mudou, registra no histórico
+  if (req.body.salary !== undefined) {
+    const { data: old } = await supabase.from('employees').select('salary').eq('id', req.params.id).single();
+    const oldSalary = Number(old?.salary) || 0;
+    const newSalary = Number(req.body.salary);
+    if (newSalary > 0 && newSalary !== oldSalary) {
+      const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+      const now = new Date();
+      const dateStr = `${months[now.getMonth()]}/${String(now.getFullYear()).slice(2)}`;
+      const pct = oldSalary > 0
+        ? `${newSalary > oldSalary ? '+' : ''}${(((newSalary - oldSalary) / oldSalary) * 100).toFixed(1)}%`
+        : null;
+      await supabase.from('salary_history').insert({
+        employee_id: req.params.id,
+        date: dateStr,
+        salary: newSalary,
+        pct,
+        event: req.body.salary_event || (oldSalary === 0 ? 'Admissão' : 'Atualização salarial'),
+        created_by: req.user.name,
+      });
+    }
+  }
+
   const { data, error } = await supabase.from('employees').update(u).eq('id', req.params.id).select('*').single();
   if (error) return res.status(500).json({ error: error.message });
   const { password_hash, ...safe } = data;
