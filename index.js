@@ -89,6 +89,15 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json({ user: req.user }));
 
+// Perfil completo do usuário logado (campos extras: salário, endereço, etc.)
+app.get('/api/auth/profile', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('employees').select('*').eq('id', req.user.id).single();
+  if (error) return res.status(500).json({ error: error.message });
+  const { password_hash, ...safe } = data;
+  res.json({ profile: { ...safe, cpf: maskCpf(safe.cpf) } });
+});
+
 app.put('/api/auth/change-password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha senha atual e nova' });
