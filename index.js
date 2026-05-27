@@ -374,17 +374,19 @@ async function advanceQueue(reason = 'auto') {
 
 let lastKnownSpotifyId = null;
 let nearEndTriggered   = false;
-let wasPlaying         = false; // ← novo
+let wasPlaying         = false;
 
 async function monitorPlayback() {
   try {
     const r = await spotify('get', '/me/player/currently-playing');
 
+    // 204 = nada tocando
     if (r.status === 204 || !r.data?.item) {
       if (lastKnownSpotifyId) {
         const { data: state } = await supabase
-          .from('player_state').select('current_spotify_id').eq('id', 1).single();
-        if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
+          .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
+        // Se player_state ainda marca is_playing=true, ninguém pausou manualmente → música terminou
+        if (state?.current_spotify_id === lastKnownSpotifyId && state?.is_playing === true) {
           console.log('🎵 Playback parou (204) — avançando fila...');
           await advanceQueue('auto');
         }
@@ -399,17 +401,22 @@ async function monitorPlayback() {
     const spotifyId = item.id;
     const remaining = item.duration_ms - progress_ms;
 
-    // ── Detecta música que parou naturalmente (is_playing virou false) ──
+    // ── Música parou de tocar ──────────────────────────────
     if (!is_playing) {
-      if (wasPlaying && lastKnownSpotifyId === spotifyId && remaining < 8000) {
+      if (wasPlaying && lastKnownSpotifyId === spotifyId) {
         const { data: state } = await supabase
-          .from('player_state').select('current_spotify_id').eq('id', 1).single();
-        if (state?.current_spotify_id === spotifyId) {
+          .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
+
+        // player_state.is_playing ainda true = não foi pausa manual = música terminou naturalmente
+        if (state?.current_spotify_id === spotifyId && state?.is_playing === true) {
           console.log('🎵 Música terminou naturalmente — avançando fila...');
           await advanceQueue('auto');
           lastKnownSpotifyId = null;
           nearEndTriggered   = false;
           wasPlaying         = false;
+        } else {
+          // Usuário pausou manualmente — não avança a fila
+          wasPlaying = false;
         }
       } else {
         wasPlaying = false;
@@ -422,16 +429,16 @@ async function monitorPlayback() {
     const { data: state } = await supabase
       .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
 
-    // ── Mudança de faixa (skip no dispositivo) ──
+    // ── Mudança de faixa (skip no dispositivo) ────────────
     if (lastKnownSpotifyId && lastKnownSpotifyId !== spotifyId) {
-      if (state?.current_spotify_id && state.current_spotify_id === lastKnownSpotifyId) {
+      if (state?.current_spotify_id === lastKnownSpotifyId) {
         await advanceQueue('auto');
         nearEndTriggered = false;
       }
     }
     lastKnownSpotifyId = spotifyId;
 
-    // ── Pré-transição nos últimos 8 segundos ──
+    // ── Pré-transição nos últimos 8 segundos ──────────────
     if (remaining < 8000 && remaining > 500 && !nearEndTriggered) {
       if (state?.current_spotify_id === spotifyId) {
         const next = await getNextSong();
