@@ -789,29 +789,102 @@ async function advanceQueue(reason = 'auto') {
 
 // ═══════════════════════════════════════════════════════
 // MONITOR DE PLAYBACK (a cada 4 segundos)
-// Detecta quando a música atual terminou e avança a fila
+// Sincroniza Spotify → Crescent em tempo real.
+// Detecta faixas externas (Alexa, Spotify manual) e
+// insere na fila para aparecer no UI.
 // ═══════════════════════════════════════════════════════
 
-let lastKnownSpotifyId = null;
+let lastKnownSpotifyId = null;   // último ID visto no Spotify
+let lastQueueSongId    = null;   // último ID da fila Crescent que iniciamos
 let nearEndTriggered   = false;
 let wasPlaying         = false;
+
+/** Formata ms → "3:45" */
+function fmtMs(ms) {
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Chamada quando o Spotify toca algo que NÃO está na fila do Crescent.
+ * Insere a faixa como "playing" com requested_by = 'Alexa 🎙️'
+ * para aparecer no UI normalmente.
+ */
+async function syncExternalTrack(item) {
+  const spotifyId  = item.id;
+  const uri        = item.uri;
+  const title      = item.name;
+  const artist     = item.artists?.map(a => a.name).join(', ') || 'Desconhecido';
+  const album_art  = item.album?.images?.[0]?.url || null;
+  const duration_ms = item.duration_ms;
+  const duration_str = fmtMs(duration_ms);
+
+  // Calcula posição após o último item da fila
+  const { data: max } = await supabase
+    .from('queue').select('position')
+    .in('status', ['pending', 'playing'])
+    .order('position', { ascending: false }).limit(1);
+  const position = (max?.[0]?.position ?? -1) + 1;
+
+  // Marca qualquer outra música como 'playing' → 'played'
+  await supabase.from('queue').update({ status: 'played' }).eq('status', 'playing');
+
+  // Insere a faixa externa diretamente como tocando
+  const { data: inserted } = await supabase.from('queue').insert({
+    spotify_uri: uri,
+    spotify_id: spotifyId,
+    title, artist, album_art,
+    requested_by: 'Alexa 🎙️',
+    duration_ms, duration_str,
+    position,
+    status: 'playing',
+  }).select().single();
+
+  if (!inserted) return null;
+
+  // Atualiza player_state para apontar para esta entrada
+  await supabase.from('player_state').upsert({
+    id: 1,
+    is_playing:         true,
+    current_song_id:    inserted.id,
+    current_spotify_id: spotifyId,
+    updated_at:         new Date().toISOString(),
+  });
+
+  console.log(`📡 Faixa externa sincronizada: "${title}" — ${artist} (Alexa/Spotify)`);
+  return inserted;
+}
 
 async function monitorPlayback() {
   try {
     const r = await spotify('get', '/me/player/currently-playing');
 
-    // 204 = nada tocando
+    // ── 204 / nada tocando ────────────────────────────────
     if (r.status === 204 || !r.data?.item) {
       if (lastKnownSpotifyId) {
         const { data: state } = await supabase
-          .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
-        // Se player_state ainda marca is_playing=true, ninguém pausou manualmente → música terminou
-        if (state?.current_spotify_id === lastKnownSpotifyId && state?.is_playing === true) {
-          console.log('🎵 Playback parou (204) — avançando fila...');
-          await advanceQueue('auto');
+          .from('player_state')
+          .select('current_spotify_id, is_playing, current_song_id')
+          .eq('id', 1).single();
+
+        if (state?.is_playing === true && state?.current_spotify_id === lastKnownSpotifyId) {
+          if (state?.current_song_id) {
+            // Era uma música da fila → avança normalmente
+            console.log('🎵 Playback parou (204) — avançando fila...');
+            await advanceQueue('auto');
+          } else {
+            // Era faixa externa sem ID na fila → apenas limpa estado
+            await supabase.from('player_state').upsert({
+              id: 1, is_playing: false,
+              current_song_id: null, current_spotify_id: null,
+              updated_at: new Date().toISOString(),
+            });
+          }
         }
       }
       lastKnownSpotifyId = null;
+      lastQueueSongId    = null;
       nearEndTriggered   = false;
       wasPlaying         = false;
       return;
@@ -821,51 +894,80 @@ async function monitorPlayback() {
     const spotifyId = item.id;
     const remaining = item.duration_ms - progress_ms;
 
-    // ── Música parou de tocar ──────────────────────────────
+    // ── Pausado ───────────────────────────────────────────
     if (!is_playing) {
-      if (wasPlaying && lastKnownSpotifyId === spotifyId) {
-        const { data: state } = await supabase
-          .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
-
-        // player_state.is_playing ainda true = não foi pausa manual = música terminou naturalmente
-        if (state?.current_spotify_id === spotifyId && state?.is_playing === true) {
-          console.log('🎵 Música terminou naturalmente — avançando fila...');
-          await advanceQueue('auto');
-          lastKnownSpotifyId = null;
-          nearEndTriggered   = false;
-          wasPlaying         = false;
-        } else {
-          // Usuário pausou manualmente — não avança a fila
-          wasPlaying = false;
-        }
-      } else {
-        wasPlaying = false;
+      if (wasPlaying) {
+        // Atualiza is_playing no banco sem avançar fila
+        await supabase.from('player_state').upsert({
+          id: 1, is_playing: false,
+          updated_at: new Date().toISOString(),
+        });
       }
+      wasPlaying = false;
       return;
     }
 
+    // ── Tocando ───────────────────────────────────────────
     wasPlaying = true;
 
-    const { data: state } = await supabase
-      .from('player_state').select('current_spotify_id, is_playing').eq('id', 1).single();
+    // ── Nova faixa detectada no Spotify ───────────────────
+    if (lastKnownSpotifyId !== spotifyId) {
+      console.log(`🎵 Spotify: "${item.name}" — ${item.artists?.map(a=>a.name).join(', ')}`);
 
-    // ── Mudança de faixa (skip no dispositivo) ────────────
-    if (lastKnownSpotifyId && lastKnownSpotifyId !== spotifyId) {
-      if (state?.current_spotify_id === lastKnownSpotifyId) {
-        await advanceQueue('auto');
-        nearEndTriggered = false;
+      const { data: state } = await supabase
+        .from('player_state')
+        .select('current_spotify_id, is_playing, current_song_id')
+        .eq('id', 1).single();
+
+      // Se a faixa anterior era da fila do Crescent → avança (marca como played)
+      if (
+        lastKnownSpotifyId &&
+        state?.current_spotify_id === lastKnownSpotifyId &&
+        state?.current_song_id   // tinha um ID na fila
+      ) {
+        const newStatus = 'played';
+        await supabase.from('queue').update({ status: newStatus }).eq('id', state.current_song_id);
+        console.log(`⏭  Faixa anterior marcada como played: ${state.current_song_id}`);
       }
+
+      // Verifica se a nova faixa está na fila do Crescent (pending)
+      const { data: queueMatch } = await supabase
+        .from('queue')
+        .select('*')
+        .eq('spotify_id', spotifyId)
+        .eq('status', 'pending')
+        .order('position', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (queueMatch) {
+        // ✅ Faixa da fila — marca como playing normalmente
+        await supabase.from('queue').update({ status: 'playing' }).eq('id', queueMatch.id);
+        await supabase.from('player_state').upsert({
+          id: 1,
+          is_playing:         true,
+          current_song_id:    queueMatch.id,
+          current_spotify_id: spotifyId,
+          updated_at:         new Date().toISOString(),
+        });
+        lastQueueSongId = queueMatch.id;
+        console.log(`✅ Faixa da fila: "${queueMatch.title}"`);
+      } else {
+        // 📡 Faixa externa (Alexa, Spotify manual, etc.) → sincroniza no UI
+        const ext = await syncExternalTrack(item);
+        if (ext) lastQueueSongId = ext.id;
+      }
+
+      nearEndTriggered   = false;
+      lastKnownSpotifyId = spotifyId;
     }
-    lastKnownSpotifyId = spotifyId;
 
     // ── Pré-transição nos últimos 8 segundos ──────────────
     if (remaining < 8000 && remaining > 500 && !nearEndTriggered) {
-      if (state?.current_spotify_id === spotifyId) {
-        const next = await getNextSong();
-        if (next) {
-          nearEndTriggered = true;
-          console.log(`⏳ ${Math.round(remaining / 1000)}s restantes — preparando: ${next.title}`);
-        }
+      const next = await getNextSong();
+      if (next) {
+        nearEndTriggered = true;
+        console.log(`⏳ ${Math.round(remaining / 1000)}s restantes — preparando: ${next.title}`);
       }
     }
 
@@ -879,7 +981,7 @@ async function monitorPlayback() {
 }
 
 setInterval(monitorPlayback, 4000);
-console.log('🔁 Monitor de playback iniciado (4s)');
+console.log('🔁 Monitor de playback iniciado (4s) — sincroniza Spotify + Alexa em tempo real');
 
 // ═══════════════════════════════════════════════════════
 // START
