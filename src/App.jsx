@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { createClient as _createSupabaseClient } from '@supabase/supabase-js';
 import logoNicolas from "./assets/LogoTipoNicolas.png";
+import unikoLogo        from "./assets/Uniko.png";
+// UnikoQuadrado.png fica em public/ — referenciado via URL /UnikoQuadrado.png
 import dokoTecnico      from "./assets/DodocoTecnico.jpg";
 import dokoCozinheiro   from "./assets/DodocoCozinheiro.jpg";
 import dokoMedico       from "./assets/DodocoMedico.jpg";
@@ -496,17 +498,38 @@ const StarDivider = ({my=8, width='100%', dim=false}) => {
   );
 };
 
-/* ══════════════════════════════════════════
-   LOGO PNG
-══════════════════════════════════════════ */
+/* Logo de crédito — LogoTipoNicolas (rodapé "Criado por Nicolas Andrade") */
 const Logo = ({size=64}) => (
-  <img src={logoNicolas} alt="Crescent Hub — Nicolas Andrade"
+  <img src={logoNicolas} alt="Nicolas Andrade"
     style={{
       width:size, height:size,
       objectFit:'contain',
       display:'block',
       flexShrink:0,
-      filter:'drop-shadow(0 4px 20px rgba(14,60,140,0.30))',
+    }}/>
+);
+
+/* Logo principal da marca — Uniko.png (hero em login, landing, módulos) */
+const BrandLogo = ({size=120}) => (
+  <img src={unikoLogo} alt="Uniko"
+    style={{
+      width:size, height:size,
+      objectFit:'contain',
+      display:'block',
+      flexShrink:0,
+      filter:'drop-shadow(0 6px 24px rgba(14,60,180,0.22))',
+    }}/>
+);
+
+/* Ícone quadrado — UnikoQuadrado.png em /public (topbars, sidebars, favicon) */
+const UnikoIcon = ({size=32, rounded=true}) => (
+  <img src="/UnikoQuadrado.png" alt="Uniko"
+    style={{
+      width:size, height:size,
+      objectFit:'cover',
+      display:'block',
+      flexShrink:0,
+      borderRadius: rounded ? Math.round(size * 0.22) : 0,
     }}/>
 );
 
@@ -603,15 +626,14 @@ const LandingPage = ({onStart}) => {
       {/* sem luas nos cantos e sem linhas absolutas */}
 
       <div style={{display:'flex',flexDirection:'column',alignItems:'center',textAlign:'center'}}>
-        {/* Logo ring */}
-        {/* Logo — PNG puro, grande, centralizado */}
+        {/* Logo principal — Uniko */}
         <div className="fsu" style={{marginBottom:28,display:'flex',justifyContent:'center',alignItems:'center'}}>
-          <Logo size={160}/>
+          <BrandLogo size={168}/>
         </div>
 
         <div className="fsu2">
           <div style={{fontFamily:'var(--font-brand)',fontSize:54,fontWeight:700,
-            color:T.text,letterSpacing:'.12em',lineHeight:1}}>CRESCENT</div>
+            color:T.text,letterSpacing:'.12em',lineHeight:1}}>UNIKO</div>
           <div style={{fontFamily:'var(--font-brand)',fontSize:28,fontWeight:400,
             color:T.gold,letterSpacing:'.30em',marginTop:6}}>HUB</div>
         </div>
@@ -645,8 +667,8 @@ const LandingPage = ({onStart}) => {
           </button>
         </div>
 
-        <div className="fsu4" style={{marginTop:50,display:'flex',alignItems:'center',gap:12,opacity:.4}}>
-          <Logo size={26}/>
+        <div className="fsu4" style={{marginTop:50,display:'flex',alignItems:'center',gap:10,opacity:.45}}>
+          <Logo size={22}/>
           <span style={{fontFamily:'var(--font-body)',fontSize:12,color:T.textT}}>
             Criado por <span style={{fontFamily:'var(--font-brand)',fontSize:12,fontWeight:600,color:T.gold}}>Nicolas Andrade</span>
           </span>
@@ -706,10 +728,10 @@ const LoginScreen = ({onLogin}) => {
         background:'rgba(240,248,255,0.55)',backdropFilter:'blur(12px)',
         borderRight:`1px solid ${T.border}`}}>
         <div style={{marginBottom:32,display:'flex',justifyContent:'center'}}>
-          <Logo size={110}/>
+          <BrandLogo size={112}/>
         </div>
         <div style={{fontFamily:'var(--font-brand)',fontSize:38,fontWeight:700,
-          color:T.text,letterSpacing:'.10em',textAlign:'center',lineHeight:1}}>CRESCENT</div>
+          color:T.text,letterSpacing:'.10em',textAlign:'center',lineHeight:1}}>UNIKO</div>
         <div style={{fontFamily:'var(--font-brand)',fontSize:20,fontWeight:400,
           color:T.gold,letterSpacing:'.28em',marginTop:6,textAlign:'center'}}>HUB</div>
         <div style={{margin:'20px 0 16px',width:'320px'}}><StarDivider/></div>
@@ -887,13 +909,13 @@ const ModuleSelector = ({onSelect, authUser, onLogout}) => {
     <div style={{minHeight:'100vh',display:'flex',flexDirection:'column',
       alignItems:'center',justifyContent:'center',position:'relative',zIndex:1,padding:'40px 32px'}}>
       <div className="fsu" style={{textAlign:'center',marginBottom:44}}>
-        {/* Logo grande centralizado */}
+        {/* Logo principal — Uniko */}
         <div style={{display:'flex',justifyContent:'center',marginBottom:18}}>
-          <Logo size={165}/>
+          <BrandLogo size={165}/>
         </div>
         {/* Nome do sistema */}
         <div style={{fontFamily:'var(--font-brand)',fontSize:28,fontWeight:700,
-          color:T.text,letterSpacing:'.07em',lineHeight:1}}>CRESCENT HUB</div>
+          color:T.text,letterSpacing:'.07em',lineHeight:1}}>UNIKO</div>
         <div style={{fontFamily:'var(--font-body)',fontSize:13,color:T.textT,
           letterSpacing:'.10em',textTransform:'uppercase',marginTop:5,marginBottom:14}}>
           Sistema Corporativo
@@ -1040,12 +1062,12 @@ const Sidebar = ({tab,setTab,onBack,activeTheme,onTheme,onOpenSettings}) => {
               zIndex:0,pointerEvents:'none'}}/>
             <div style={{position:'absolute',inset:0,zIndex:1,
               display:'flex',alignItems:'center',justifyContent:'center'}}>
-              <Logo size={58}/>
+              <UnikoIcon size={52} rounded={true}/>
             </div>
           </div>
           <div>
             <div style={{fontFamily:'var(--font-brand)',fontSize:15.5,fontWeight:700,
-              color:T.text,letterSpacing:'.05em'}}>CRESCENT HUB</div>
+              color:T.text,letterSpacing:'.05em'}}>UNIKO</div>
             <div style={{fontSize:12,color:T.textT,letterSpacing:'.06em',
               textTransform:'uppercase',marginTop:3}}>Portal do Colaborador</div>
           </div>
@@ -2622,7 +2644,7 @@ const DashboardRH = ({onBack, adminName='Administrador'}) => {
 
       {/* Body: sidebar + content */}
       <div style={{display:'flex',flex:1,maxWidth:1400,margin:'0 auto',width:'100%',padding:'24px 24px',gap:20,alignItems:'flex-start'}}>
-              {/* Sidebar com identidade visual Crescent Hub */}
+              {/* Sidebar com identidade visual Uniko */}
         <div style={{width:220,flexShrink:0,display:'flex',flexDirection:'column',gap:0,
           background:tabsBg,backdropFilter:'blur(20px)',WebkitBackdropFilter:'blur(20px)',
           border:`1px solid ${T.border}`,borderRadius:16,overflow:'hidden',
@@ -2637,9 +2659,9 @@ const DashboardRH = ({onBack, adminName='Administrador'}) => {
             <div style={{position:'absolute',width:50,height:50,borderRadius:'50%',background:T.goldL||T.gold,filter:'blur(16px)',opacity:0.15,top:'5px',left:'65%',animation:'hdrBlob2 8s ease-in-out infinite'}}/>
             {/* Logo + nome */}
             <div style={{position:'relative',zIndex:1,display:'flex',alignItems:'center',gap:10}}>
-              <Logo size={30}/>
+              <UnikoIcon size={30}/>
               <div>
-                <div style={{fontFamily:'var(--font-brand)',fontSize:12,fontWeight:700,color:T.text,letterSpacing:'.08em'}}>CRESCENT HUB</div>
+                <div style={{fontFamily:'var(--font-brand)',fontSize:12,fontWeight:700,color:T.text,letterSpacing:'.08em'}}>UNIKO</div>
                 <div style={{fontSize:10,color:T.gold,fontWeight:600,letterSpacing:'.05em'}}>Dashboard RH</div>
               </div>
             </div>
@@ -3630,7 +3652,7 @@ const DashboardRH = ({onBack, adminName='Administrador'}) => {
               <Card style={{padding:'20px 24px',background:cardBg,backdropFilter:'blur(16px)',WebkitBackdropFilter:'blur(16px)'}} elevated>
                 <div style={{fontFamily:'var(--font-brand)',fontSize:15,fontWeight:700,color:T.text,marginBottom:16}}>Sobre o Sistema</div>
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-                  {[['Sistema','Crescent Hub'],['Versão','1.0 — Visual Preview'],['Empresa','7SERV GESTÃO BENEFÍCIOS'],['Módulos','Portal Colaborador · Ponto Eletrônico · Dashboard RH'],['Backend','Previsto — em desenvolvimento'],['Desenvolvido por','Nicolas Andrade']].map(([l,v])=>(
+                  {[['Sistema','Uniko'],['Versão','1.0 — Visual Preview'],['Empresa','7SERV GESTÃO BENEFÍCIOS'],['Módulos','Portal Colaborador · Ponto Eletrônico · Dashboard RH'],['Backend','Previsto — em desenvolvimento'],['Desenvolvido por','Nicolas Andrade']].map(([l,v])=>(
                     <div key={l}>
                       <div style={{fontSize:10,color:T.textD,textTransform:'uppercase',letterSpacing:'.08em',fontWeight:600,marginBottom:3}}>{l}</div>
                       <div style={{fontSize:13,color:T.textS}}>{v}</div>
@@ -5602,7 +5624,7 @@ const PontoEletronico = ({onBack, isAdmin=false}) => {
       </div>
       <table><thead><tr><th>Data</th><th>Dia</th><th>Marcações</th><th>Trabalhado</th><th>Esperado</th><th>Saldo</th><th>Banco Acum.</th><th>Observação</th></tr></thead>
       <tbody>${rows}<tr class="tr"><td colspan="3" style="padding:8px 10px">TOTAL</td><td style="padding:8px 10px">${fmtMin(totMin)}</td><td></td><td style="padding:8px 10px;color:${totBal>=0?'#1A9C70':'#C04050'}">${totBal>=0?'+':''}${fmtMin(totBal)}</td><td colspan="2"></td></tr></tbody>
-      </table><div style="font-size:10px;color:#999;border-top:1px solid #eee;padding-top:10px">Gerado em ${new Date().toLocaleString('pt-BR')} · Crescent Hub</div>
+      </table><div style="font-size:10px;color:#999;border-top:1px solid #eee;padding-top:10px">Gerado em ${new Date().toLocaleString('pt-BR')} · Uniko</div>
     </body></html>`;
     const w=window.open('','_blank','width=900,height=700'); w.document.write(html); w.document.close(); setTimeout(()=>w.print(),400);
   };
@@ -5630,7 +5652,7 @@ const PontoEletronico = ({onBack, isAdmin=false}) => {
       <h2>${displayRazao(afd?.header?.razao)} · ${dayEmps.length} funcionário${dayEmps.length!==1?'s':''}</h2>
       <table style="margin-top:14px"><thead><tr><th>Funcionário</th><th>PIS/CPF</th><th>Marcações</th><th>Trabalhado</th><th>Saldo</th><th>Inconsistências</th><th>Observação</th></tr></thead>
       <tbody>${rows}</tbody></table>
-      <div style="font-size:10px;color:#999;border-top:1px solid #eee;padding-top:10px;margin-top:16px">Gerado em ${new Date().toLocaleString('pt-BR')} · Crescent Hub</div>
+      <div style="font-size:10px;color:#999;border-top:1px solid #eee;padding-top:10px;margin-top:16px">Gerado em ${new Date().toLocaleString('pt-BR')} · Uniko</div>
     </body></html>`;
     const w=window.open('','_blank','width=900,height=700'); w.document.write(html); w.document.close(); setTimeout(()=>w.print(),400);
   };
@@ -5724,7 +5746,7 @@ const PontoEletronico = ({onBack, isAdmin=false}) => {
         </tr></tfoot>
       </table>
       <div class="footer">
-        <span>Gerado pelo Crescent Hub em ${new Date().toLocaleString('pt-BR')} | Portaria 671/2021</span>
+        <span>Gerado pelo Uniko em ${new Date().toLocaleString('pt-BR')} | Portaria 671/2021</span>
         <span>___________________________________ Assinatura do Colaborador</span>
       </div>
       <script>window.onload=()=>{window.print();}</script>
@@ -5761,7 +5783,7 @@ const PontoEletronico = ({onBack, isAdmin=false}) => {
           <Logo size={72}/>
         </div>
         <div style={{fontFamily:'var(--font-brand)',fontSize:11,fontWeight:400,color:T.textD,letterSpacing:'.35em',textTransform:'uppercase',marginBottom:10}}>
-          Crescent Hub
+          Uniko
         </div>
         <div style={{fontFamily:'var(--font-brand)',fontSize:36,fontWeight:700,color:T.text,letterSpacing:'.06em',lineHeight:1,marginBottom:6}}>
           Ponto Eletrônico
@@ -5807,7 +5829,7 @@ const PontoEletronico = ({onBack, isAdmin=false}) => {
         ))}
       </div>
 
-      {/* Footer Crescent Hub */}
+      {/* Footer Uniko */}
       <div className="fsu4" style={{position:'absolute',bottom:24,display:'flex',alignItems:'center',gap:10,opacity:.35}}>
         <Logo size={20}/>
         <span style={{fontFamily:'var(--font-body)',fontSize:12,color:T.textT}}>
@@ -7276,7 +7298,7 @@ const CentralAlexa = ({onBack}) => {
     }, 1200);
   };
 
-  const VETO    = 3;
+  const VETO    = 4;
   const cur     = currentSong || queue.find(s=>s.status==='playing') || queue[0];
   const curIdx  = queue.findIndex(s=>s.id===cur?.id);
 
@@ -7350,7 +7372,7 @@ const CentralAlexa = ({onBack}) => {
           Módulos
         </button>
         <div style={{width:1,height:20,background:T.border}}/>
-        <span style={{fontSize:16}}>🎵</span>
+        <UnikoIcon size={32}/>
         <span style={{fontSize:14,fontWeight:700,color:T.text,fontFamily:"var(--font-brand)",letterSpacing:".04em"}}>Central Alexa</span>
         <Tag color={T.gold}>Novo</Tag>
         <div style={{flex:1}}/>
@@ -7366,7 +7388,6 @@ const CentralAlexa = ({onBack}) => {
       </div>
 
       <div style={{maxWidth:1200,margin:"0 auto",padding:"24px",position:"relative",zIndex:2}}>
-        {/* Tabs */}
         <div style={{display:"flex",gap:6,marginBottom:20,padding:4,width:"fit-content",background:isDark?`${T.surface}cc`:(T.surfaceW||"rgba(255,255,255,0.70)"),backdropFilter:"blur(14px)",WebkitBackdropFilter:"blur(14px)",border:`1px solid ${T.border}`,borderRadius:13,boxShadow:T.sh}}>
           {[
             {id:"festival",  label:"Festival",          adminOnly:false, icon:<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>},
@@ -7389,9 +7410,9 @@ const CentralAlexa = ({onBack}) => {
           <div style={{position:"relative",zIndex:1}}>
           <div style={{display:"flex",gap:20,alignItems:"flex-start",position:"relative",zIndex:1}}>
 
-            {/* Left: DokoWave + Player */}
+            {/* Left: UnikoWave + Player */}
             <div style={{width:280,flexShrink:0,display:"flex",flexDirection:"column",gap:16}}>
-              {/* DokoWave mascot */}
+              {/* UnikoWave mascot */}
               <div style={{borderRadius:20,background:cardBg,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",border:`1px solid ${T.border}`,padding:"16px 16px 12px",boxShadow:T.shM,position:"relative"}}>
                 <div style={{position:"absolute",width:80,height:80,borderRadius:"50%",background:festColors?.[0]||T.gold,filter:"blur(30px)",opacity:0.12,top:0,left:"20%",transition:"background 1.5s ease"}}/>
                 {/* Speech bubble */}
@@ -7399,7 +7420,7 @@ const CentralAlexa = ({onBack}) => {
                   {dokoMsg}
                   <div style={{position:"absolute",bottom:-8,left:16,width:0,height:0,borderLeft:"8px solid transparent",borderRight:"8px solid transparent",borderTop:`8px solid ${T.goldLine}55`}}/>
                 </div>
-                {/* DokoWave image — float só na imagem, não afeta o label */}
+                {/* UnikoWave image — float só na imagem, não afeta o label */}
                 <div style={{display:"flex",justifyContent:"center",position:"relative",zIndex:1,marginBottom:10}}>
                   <div style={{
                     width:160,height:160,borderRadius:"50%",overflow:"hidden",
@@ -7409,12 +7430,12 @@ const CentralAlexa = ({onBack}) => {
                     "--doko-color":festColors?.[0]||T.gold,
                     transition:"border-color 1.5s ease, box-shadow 1.5s ease",
                   }}>
-                    <img src={DOKO_WAVE_IMG} alt="DokoWave DJ"
+                    <img src={DOKO_WAVE_IMG} alt="UnikoWave DJ"
                       style={{width:"100%",height:"100%",objectFit:"cover",display:"block",
                         animation:"dokoFloat 3s ease-in-out infinite"}}/>
                   </div>
                 </div>
-                <div style={{textAlign:"center",fontSize:10,color:T.textD,fontWeight:600,letterSpacing:".08em",position:"relative",zIndex:1}}>DOKOWAVE · DJ DA 7 BENEFÍCIOS</div>
+                <div style={{textAlign:"center",fontSize:10,color:T.textD,fontWeight:600,letterSpacing:".08em",position:"relative",zIndex:1}}>UNIKOWAVE · DJ DA 7 BENEFÍCIOS</div>
               </div>
 
               {/* Player controls */}
@@ -7462,10 +7483,12 @@ const CentralAlexa = ({onBack}) => {
                     style={{width:36,height:36,borderRadius:9,border:`1px solid ${T.border}`,background:"transparent",cursor:(spotifyOk&&queue.length>=2)?"pointer":"not-allowed",color:T.textS,display:"flex",alignItems:"center",justifyContent:"center",outline:"none",opacity:(spotifyOk&&queue.length>=2)?1:0.4}}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
                   </button>
-                  <button onClick={handleLoadDevices} disabled={!spotifyOk} title="Selecionar dispositivo"
+                  {isAdmin && (
+                  <button onClick={handleLoadDevices} disabled={!spotifyOk} title="Selecionar dispositivo (Admin)"
                     style={{width:36,height:36,borderRadius:9,border:`1px solid ${T.border}`,background:"transparent",cursor:spotifyOk?"pointer":"not-allowed",color:T.textS,display:"flex",alignItems:"center",justifyContent:"center",outline:"none",opacity:spotifyOk?1:0.4}}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   </button>
+                  )}
                 </div>
                 {/* Device selector */}
                 {showDevices&&(
@@ -7586,10 +7609,19 @@ const CentralAlexa = ({onBack}) => {
                         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke={T.textT} strokeWidth="1.5" strokeLinecap="round" style={{margin:"0 auto 8px",display:"block"}}><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                         Fila vazia! Pesquise uma música acima.
                       </div>
-                    : queue.map((s,i)=>{
+                    : [...queue]
+                    // ── Ordena: tocando primeiro, depois pendentes por posição ──
+                    .sort((a,b)=>{
+                      if (a.status==='playing' && b.status!=='playing') return -1;
+                      if (a.status!=='playing' && b.status==='playing') return 1;
+                      return (a.position||0) - (b.position||0);
+                    })
+                    .map((s,i)=>{
                         const votes = skipVotes[s.id]||0;
                         const iAmPlaying = s.status==='playing';
                         const voted = myVotedSongs.has(s.id);
+                        const isMyOwn = s.requested_by === myName;
+                        const canDelete = isMyOwn && !iAmPlaying;
                         return (
                           <div key={s.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 16px",borderTop:i===0?"none":`1px solid ${T.border}`,background:iAmPlaying?T.goldGl:"transparent",transition:"background .15s"}}>
                             {/* Position / EQ */}
@@ -7618,18 +7650,48 @@ const CentralAlexa = ({onBack}) => {
                               </div>
                               <span style={{fontSize:10,color:T.textT,maxWidth:48,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.requested_by}</span>
                             </div>
-                            {/* Vote to skip */}
-                            <button onClick={()=>handleVote(s)} disabled={voted}
-                              style={{display:"flex",alignItems:"center",gap:4,padding:"3px 9px",borderRadius:6,
-                                border:`1.5px solid ${votes>0?"rgba(192,64,80,0.4)":T.border}`,
-                                background:voted?"rgba(192,64,80,0.04)":votes>0?"rgba(192,64,80,0.06)":"transparent",
-                                color:votes>0?"#C04050":T.textD,
-                                cursor:voted?"default":"pointer",
-                                fontSize:11,fontWeight:votes>0?700:400,outline:"none",transition:"all .15s",
-                                opacity:voted?0.6:1}}>
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17"/></svg>
-                              {votes}/{VETO}
-                            </button>
+                            {/* Vote to skip — somente na música tocando agora */}
+                            {iAmPlaying && (
+                              isAdmin
+                                ? /* Admin: pula direto sem votação */
+                                  <button onClick={()=>handleVote(s)}
+                                    title="Pular (Admin)"
+                                    style={{display:"flex",alignItems:"center",gap:4,padding:"3px 9px",borderRadius:6,
+                                      border:`1.5px solid ${T.gold}55`,
+                                      background:T.goldGl,
+                                      color:T.gold,
+                                      cursor:"pointer",
+                                      fontSize:11,fontWeight:700,outline:"none",transition:"all .15s"}}>
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+                                    Pular
+                                  </button>
+                                : /* Usuário comum: vota para skip */
+                                  <button onClick={()=>handleVote(s)} disabled={voted}
+                                    style={{display:"flex",alignItems:"center",gap:4,padding:"3px 9px",borderRadius:6,
+                                      border:`1.5px solid ${votes>0?"rgba(192,64,80,0.4)":T.border}`,
+                                      background:voted?"rgba(192,64,80,0.04)":votes>0?"rgba(192,64,80,0.06)":"transparent",
+                                      color:votes>0?"#C04050":T.textD,
+                                      cursor:voted?"default":"pointer",
+                                      fontSize:11,fontWeight:votes>0?700:400,outline:"none",transition:"all .15s",
+                                      opacity:voted?0.6:1}}>
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10 15v4a3 3 0 003 3l4-9V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z"/><path d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17"/></svg>
+                                    {votes}/{VETO}
+                                  </button>
+                            )}
+                            {/* Deletar — somente músicas que o próprio usuário adicionou (e não estão tocando) */}
+                            {canDelete && (
+                              <button
+                                onClick={async()=>{
+                                  await api('delete', `/api/queue/${s.id}`);
+                                  loadQueue();
+                                }}
+                                title="Remover minha música"
+                                style={{display:"flex",alignItems:"center",justifyContent:"center",width:26,height:26,borderRadius:6,border:`1.5px solid ${T.border}`,background:"transparent",color:T.textD,cursor:"pointer",outline:"none",flexShrink:0,opacity:0.7,transition:"opacity .15s"}}
+                                onMouseEnter={e=>{e.currentTarget.style.opacity="1";e.currentTarget.style.borderColor="rgba(192,64,80,0.4)";e.currentTarget.style.color="#C04050";}}
+                                onMouseLeave={e=>{e.currentTarget.style.opacity="0.7";e.currentTarget.style.borderColor=T.border;e.currentTarget.style.color=T.textD;}}>
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+                              </button>
+                            )}
                             <span style={{fontSize:10,color:T.textD,minWidth:28,textAlign:"right"}}>{s.duration_str||"—"}</span>
                           </div>
                         );
@@ -7647,7 +7709,7 @@ const CentralAlexa = ({onBack}) => {
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
               <div>
                 <div style={{fontFamily:"var(--font-brand)",fontSize:20,fontWeight:700,color:T.text,letterSpacing:".04em"}}>Biblioteca</div>
-                <div style={{fontSize:13,color:T.textT,marginTop:3}}>Playlists criadas pelos colaboradores para o DokoWave</div>
+                <div style={{fontSize:13,color:T.textT,marginTop:3}}>Playlists criadas pelos colaboradores para o UnikoWave</div>
               </div>
               <button onClick={()=>{
                 if(!newPlaylistName.trim()) return;
@@ -7668,7 +7730,7 @@ const CentralAlexa = ({onBack}) => {
               ? <div style={{textAlign:"center",padding:"60px 0",color:T.textT}}>
                   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={T.textT} strokeWidth="1.2" strokeLinecap="round" style={{margin:"0 auto 12px",display:"block"}}><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
                   <div style={{fontSize:14}}>Nenhuma playlist ainda.</div>
-                  <div style={{fontSize:12,marginTop:4,opacity:.7}}>Crie a primeira playlist para o DokoWave tocar!</div>
+                  <div style={{fontSize:12,marginTop:4,opacity:.7}}>Crie a primeira playlist para o UnikoWave tocar!</div>
                 </div>
               : <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:14}}>
                   {playlists.map(pl=>(
@@ -7691,7 +7753,7 @@ const CentralAlexa = ({onBack}) => {
           <div style={{position:"relative",zIndex:1}}>
             <div style={{marginBottom:20}}>
               <div style={{fontFamily:"var(--font-brand)",fontSize:20,fontWeight:700,color:T.text,letterSpacing:".04em"}}>Máquina do Tempo</div>
-              <div style={{fontSize:13,color:T.textT,marginTop:3}}>O que a galera mais pediu no DokoWave</div>
+              <div style={{fontSize:13,color:T.textT,marginTop:3}}>O que a galera mais pediu no UnikoWave</div>
             </div>
             {maquinaLoading
               ? <div style={{textAlign:"center",padding:60,color:T.textT}}>
@@ -7702,7 +7764,7 @@ const CentralAlexa = ({onBack}) => {
                 ? <div style={{textAlign:"center",padding:60,color:T.textT}}>
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={T.textT} strokeWidth="1.2" strokeLinecap="round" style={{margin:"0 auto 12px",display:"block"}}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                     <div style={{fontSize:14}}>Nenhuma música tocada ainda.</div>
-                    <div style={{fontSize:12,marginTop:4,opacity:.7}}>Volte depois que o DokoWave tocar algumas músicas!</div>
+                    <div style={{fontSize:12,marginTop:4,opacity:.7}}>Volte depois que o UnikoWave tocar algumas músicas!</div>
                   </div>
                 : <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
                     {/* Top Músicas */}
@@ -7859,6 +7921,14 @@ const CentralAlexa = ({onBack}) => {
             </div>
           </div>
         )}
+      </div>
+
+      {/* ── Rodapé Criado por Nicolas Andrade ── */}
+      <div style={{textAlign:"center",padding:"24px 0 20px",borderTop:`1px solid ${T.border}`,marginTop:4,display:"flex",alignItems:"center",justifyContent:"center",gap:10,opacity:.38,position:"relative",zIndex:2}}>
+        <Logo size={20}/>
+        <span style={{fontFamily:"var(--font-body)",fontSize:11,color:T.textT}}>
+          Criado por <span style={{fontFamily:"var(--font-brand)",fontSize:11,fontWeight:600,color:T.gold}}>Nicolas Andrade</span>
+        </span>
       </div>
     </div>
   );
