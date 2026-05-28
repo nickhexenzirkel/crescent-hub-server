@@ -966,28 +966,34 @@ async function monitorPlayback() {
         console.log(`⏭  Faixa anterior marcada como played: ${state.current_song_id}`);
       }
 
-      // Verifica se a nova faixa está na fila do Crescent (pending)
+      // Verifica se a nova faixa está na fila do Crescent (pending OU já playing via startPlaying)
       const { data: queueMatch } = await supabase
         .from('queue')
         .select('*')
         .eq('spotify_id', spotifyId)
-        .eq('status', 'pending')
+        .in('status', ['pending', 'playing'])
         .order('position', { ascending: true })
         .limit(1)
         .maybeSingle();
 
       if (queueMatch) {
-        // ✅ Faixa da fila — marca como playing normalmente
-        await supabase.from('queue').update({ status: 'playing' }).eq('id', queueMatch.id);
-        await supabase.from('player_state').upsert({
-          id: 1,
-          is_playing:         true,
-          current_song_id:    queueMatch.id,
-          current_spotify_id: spotifyId,
-          updated_at:         new Date().toISOString(),
-        });
-        lastQueueSongId = queueMatch.id;
-        console.log(`✅ Faixa da fila: "${queueMatch.title}"`);
+        if (queueMatch.status === 'pending') {
+          // ✅ Faixa estava pendente — marca como playing
+          await supabase.from('queue').update({ status: 'playing' }).eq('id', queueMatch.id);
+          await supabase.from('player_state').upsert({
+            id: 1,
+            is_playing:         true,
+            current_song_id:    queueMatch.id,
+            current_spotify_id: spotifyId,
+            updated_at:         new Date().toISOString(),
+          });
+          lastQueueSongId = queueMatch.id;
+          console.log(`✅ Faixa da fila (pending→playing): "${queueMatch.title}"`);
+        } else {
+          // ✅ Faixa já foi marcada como playing pelo startPlaying — não sobrescrever
+          lastQueueSongId = queueMatch.id;
+          console.log(`✅ Faixa da fila (já playing): "${queueMatch.title}" — pedido por ${queueMatch.requested_by}`);
+        }
       } else {
         // 📡 Faixa externa (Alexa, Spotify manual, etc.) → sincroniza no UI
         const ext = await syncExternalTrack(item);
