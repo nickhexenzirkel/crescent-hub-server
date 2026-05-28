@@ -366,7 +366,7 @@ app.delete('/api/events/:id', requireAdmin, async (req, res) => {
 const CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 const REDIRECT_URI  = process.env.REDIRECT_URI || `http://localhost:${PORT}/callback`;
-const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 3;
+const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 4;
 
 // Token em memória (persiste refresh_token no Supabase para sobreviver restarts)
 let tokens = { access: null, refresh: null, expiresAt: 0 };
@@ -739,11 +739,47 @@ async function startPlaying(song) {
   const { data: devSetting } = await supabase
     .from('settings').select('value').eq('key', 'device_id').single();
 
-  const playBody = { uris: [song.spotify_uri] };
-  if (devSetting?.value) playBody.device_id = devSetting.value;
+  let deviceId = devSetting?.value;
 
-  // Manda tocar no Spotify (e na Alexa via Spotify Connect)
-  await spotify('put', '/me/player/play', playBody);
+  // ── Passo 1: Se tem dispositivo salvo, acorda ele antes de tocar ──
+  // O Spotify fica "dormindo" quando idle; transferir o playback o acorda.
+  if (deviceId) {
+    await spotify('put', '/me/player', { device_ids: [deviceId], play: false }).catch(() => {});
+    await new Promise(r => setTimeout(r, 600)); // aguarda o Spotify acordar
+  }
+
+  // ── Passo 2: Envia o comando de play ──
+  const playBody = { uris: [song.spotify_uri] };
+  if (deviceId) playBody.device_id = deviceId;
+
+  try {
+    await spotify('put', '/me/player/play', playBody);
+  } catch (playErr) {
+    // Fallback: nenhum contexto ativo — descobre dispositivos disponíveis
+    console.warn('⚠️  Play falhou, tentando descobrir dispositivo...', playErr.response?.data?.error?.message || playErr.message);
+    const devR = await spotify('get', '/me/player/devices').catch(() => null);
+    const devices = devR?.data?.devices || [];
+
+    if (devices.length > 0) {
+      const active = devices.find(d => d.is_active) || devices[0];
+      deviceId = active.id;
+
+      // Salva o dispositivo encontrado para uso futuro
+      await supabase.from('settings').upsert({ key: 'device_id', value: deviceId });
+      console.log(`🔊 Dispositivo redescoberto: ${active.name}`);
+
+      // Acorda e toca
+      await spotify('put', '/me/player', { device_ids: [deviceId], play: false }).catch(() => {});
+      await new Promise(r => setTimeout(r, 600));
+      await spotify('put', '/me/player/play', { uris: [song.spotify_uri], device_id: deviceId });
+    } else {
+      // Nenhum dispositivo ativo — não consegue tocar
+      console.error('❌ Nenhum dispositivo Spotify disponível. Abra o Spotify em algum dispositivo.');
+      // Reverte o status da música para pending para não perder ela da fila
+      await supabase.from('queue').update({ status: 'pending' }).eq('id', song.id);
+      return;
+    }
+  }
 
   // Atualiza estado no banco
   await supabase.from('queue').update({ status: 'playing' }).eq('id', song.id);
