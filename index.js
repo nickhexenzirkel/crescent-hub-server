@@ -521,6 +521,23 @@ app.get('/api/status', async (req, res) => {
   }
 });
 
+// Progresso atual do Spotify (para sincronizar letra)
+app.get('/api/progress', async (req, res) => {
+  try {
+    const r = await spotify('get', '/me/player/currently-playing');
+    if (r.status === 204 || !r.data?.item) {
+      return res.json({ progress_ms: 0, is_playing: false });
+    }
+    res.json({
+      progress_ms:  r.data.progress_ms,
+      is_playing:   r.data.is_playing,
+      duration_ms:  r.data.item.duration_ms,
+    });
+  } catch {
+    res.json({ progress_ms: 0, is_playing: false });
+  }
+});
+
 // ═══════════════════════════════════════════════════════
 // BUSCA DE MÚSICAS
 // ═══════════════════════════════════════════════════════
