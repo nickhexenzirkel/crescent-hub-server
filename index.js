@@ -537,18 +537,29 @@ app.get('/api/status', async (req, res) => {
   }
 });
 
-// Progresso atual do Spotify (para sincronizar letra)
+// Cache de progresso — evita bater no Spotify a cada request do frontend (letras sincronizadas)
+let progressCache = { data: null, at: 0 };
+const PROGRESS_CACHE_MS = 1500; // reusa resultado por 1.5s
+
 app.get('/api/progress', async (req, res) => {
   try {
+    const now = Date.now();
+    if (progressCache.data && (now - progressCache.at) < PROGRESS_CACHE_MS) {
+      return res.json(progressCache.data);
+    }
     const r = await spotify('get', '/me/player/currently-playing');
     if (r.status === 204 || !r.data?.item) {
-      return res.json({ progress_ms: 0, is_playing: false });
+      const result = { progress_ms: 0, is_playing: false };
+      progressCache = { data: result, at: now };
+      return res.json(result);
     }
-    res.json({
+    const result = {
       progress_ms:  r.data.progress_ms,
       is_playing:   r.data.is_playing,
       duration_ms:  r.data.item.duration_ms,
-    });
+    };
+    progressCache = { data: result, at: now };
+    res.json(result);
   } catch {
     res.json({ progress_ms: 0, is_playing: false });
   }
@@ -683,8 +694,8 @@ app.delete('/api/queue/:id', async (req, res) => {
 // CONTROLES DO PLAYER
 // ═══════════════════════════════════════════════════════
 
-// Começa a tocar a primeira música da fila
-app.post('/api/player/play', async (req, res) => {
+// Começa a tocar a primeira música da fila (admin only)
+app.post('/api/player/play', requireAdmin, async (req, res) => {
   try {
     const next = await getNextSong();
     if (!next) return res.status(404).json({ error: 'Fila vazia' });
@@ -696,8 +707,8 @@ app.post('/api/player/play', async (req, res) => {
   }
 });
 
-// Pausa
-app.post('/api/player/pause', async (req, res) => {
+// Pausa (admin only)
+app.post('/api/player/pause', requireAdmin, async (req, res) => {
   try {
     await spotify('put', '/me/player/pause');
     await supabase.from('player_state').upsert({ id: 1, is_playing: false, updated_at: new Date().toISOString() });
@@ -707,8 +718,8 @@ app.post('/api/player/pause', async (req, res) => {
   }
 });
 
-// Retoma
-app.post('/api/player/resume', async (req, res) => {
+// Retoma (admin only)
+app.post('/api/player/resume', requireAdmin, async (req, res) => {
   try {
     await spotify('put', '/me/player/play');
     await supabase.from('player_state').upsert({ id: 1, is_playing: true, updated_at: new Date().toISOString() });
@@ -718,8 +729,8 @@ app.post('/api/player/resume', async (req, res) => {
   }
 });
 
-// Pula para a próxima (manual)
-app.post('/api/player/next', async (req, res) => {
+// Pula para a próxima (admin only)
+app.post('/api/player/next', requireAdmin, async (req, res) => {
   try {
     await advanceQueue('manual_skip');
     res.json({ ok: true });
@@ -729,8 +740,8 @@ app.post('/api/player/next', async (req, res) => {
   }
 });
 
-// Ajuste de volume
-app.put('/api/player/volume', async (req, res) => {
+// Ajuste de volume (admin only)
+app.put('/api/player/volume', requireAdmin, async (req, res) => {
   const volume_percent = parseInt(req.query.volume_percent ?? req.body?.volume_percent);
   if (isNaN(volume_percent) || volume_percent < 0 || volume_percent > 100)
     return res.status(400).json({ error: 'volume_percent deve ser 0-100' });
