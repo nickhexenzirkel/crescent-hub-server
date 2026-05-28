@@ -498,14 +498,30 @@ async function ensureToken() {
 }
 
 // Wrapper para chamadas à Spotify Web API
+// Implementa backoff automático quando recebe 429 (rate limit)
+let rateLimitedUntil = 0;
+
 async function spotify(method, path, data) {
+  if (Date.now() < rateLimitedUntil) {
+    const waitSec = Math.round((rateLimitedUntil - Date.now()) / 1000);
+    throw Object.assign(new Error(`Rate limit ativo — aguardando ${waitSec}s`), { response: { status: 429 } });
+  }
   const token = await ensureToken();
-  return axios({
-    method,
-    url:     `https://api.spotify.com/v1${path}`,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    data:    data || undefined,
-  });
+  try {
+    return await axios({
+      method,
+      url:     `https://api.spotify.com/v1${path}`,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      data:    data || undefined,
+    });
+  } catch (err) {
+    if (err.response?.status === 429) {
+      const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '60');
+      rateLimitedUntil = Date.now() + retryAfter * 1000;
+      console.warn(`⏸  Rate limit Spotify — pausando chamadas por ${retryAfter}s`);
+    }
+    throw err;
+  }
 }
 
 // ═══════════════════════════════════════════════════════
