@@ -683,6 +683,19 @@ app.post('/api/player/next', async (req, res) => {
   }
 });
 
+// Ajuste de volume
+app.put('/api/player/volume', async (req, res) => {
+  const volume_percent = parseInt(req.query.volume_percent ?? req.body?.volume_percent);
+  if (isNaN(volume_percent) || volume_percent < 0 || volume_percent > 100)
+    return res.status(400).json({ error: 'volume_percent deve ser 0-100' });
+  try {
+    await spotify('put', `/me/player/volume?volume_percent=${volume_percent}`);
+    res.json({ ok: true, volume: volume_percent });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════
 // VOTOS PARA PULAR
 // ═══════════════════════════════════════════════════════
