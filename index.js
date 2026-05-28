@@ -765,7 +765,10 @@ app.get('/api/devices', async (req, res) => {
     const r = await spotify('get', '/me/player/devices');
     res.json({ devices: r.data.devices });
   } catch (err) {
-    res.status(500).json({ error: 'Erro ao listar dispositivos' });
+    const status  = err.response?.status;
+    const message = err.response?.data?.error?.message || err.message;
+    console.error(`❌ /api/devices falhou — HTTP ${status}: ${message}`);
+    res.status(500).json({ error: 'Erro ao listar dispositivos', detail: `HTTP ${status}: ${message}` });
   }
 });
 
