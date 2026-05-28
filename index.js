@@ -570,8 +570,23 @@ app.get('/api/search', async (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.post('/api/queue', async (req, res) => {
-  const { uri, spotify_id, title, artist, album_art, requested_by, duration_ms, duration_str } = req.body;
+  const { uri, spotify_id, title, artist, album_art, requested_by, duration_ms, duration_str, is_admin } = req.body;
   if (!uri || !title || !requested_by) return res.status(400).json({ error: 'Dados incompletos' });
+
+  // ── Limite de 2 músicas por colaborador (admin é ilimitado) ──
+  if (!is_admin) {
+    const { data: userSongs } = await supabase
+      .from('queue')
+      .select('id')
+      .eq('requested_by', requested_by)
+      .in('status', ['pending', 'playing']);
+
+    if (userSongs && userSongs.length >= 2) {
+      return res.status(429).json({
+        error: 'Limite atingido! Você já tem 2 músicas na fila. Aguarde uma delas tocar para adicionar mais.',
+      });
+    }
+  }
 
   // Próxima posição
   const { data: max } = await supabase
@@ -589,20 +604,17 @@ app.post('/api/queue', async (req, res) => {
   console.log(`➕ Queue: ${title} por ${requested_by} (pos ${position})`);
 
   // ── Auto-start: dispara sempre que a fila estava vazia ──────
-  // Verifica se esta é a única música pendente (fila estava vazia antes)
   try {
     const { count: pendingCount } = await supabase
       .from('queue').select('id', { count: 'exact', head: true }).eq('status', 'pending');
 
     if (pendingCount === 1) {
-      // Fila estava vazia — verifica se o player está parado
       const { data: playerState } = await supabase
         .from('player_state').select('is_playing, current_song_id').eq('id', 1).single();
 
       const somethingPlaying = playerState?.is_playing && playerState?.current_song_id;
 
       if (!somethingPlaying) {
-        // Auto-seleciona dispositivo se nenhum estiver salvo
         const { data: devSetting } = await supabase
           .from('settings').select('value').eq('key', 'device_id').single();
 
@@ -620,11 +632,29 @@ app.post('/api/queue', async (req, res) => {
       }
     }
   } catch (err) {
-    // Não falha o request — música fica na fila para play manual
     console.error('⚠️  Auto-start falhou:', err.response?.data?.error?.message || err.message);
   }
 
   res.json({ song: data });
+});
+
+// Limpar toda a fila (admin)
+app.delete('/api/queue', async (req, res) => {
+  try {
+    // Marca todas as músicas pending como removidas
+    await supabase.from('queue').update({ status: 'removed' }).in('status', ['pending', 'playing']);
+    // Para o player
+    await supabase.from('player_state').upsert({
+      id: 1, is_playing: false, current_song_id: null, current_spotify_id: null,
+      updated_at: new Date().toISOString(),
+    });
+    // Para o Spotify também
+    await spotify('put', '/me/player/pause').catch(() => {});
+    console.log('🗑️  Fila limpa pelo administrador');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/api/queue/:id', async (req, res) => {
