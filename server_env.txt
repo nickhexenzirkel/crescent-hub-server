@@ -1,5 +1,5 @@
 SPOTIFY_CLIENT_ID=5257974bc93e452c89e4fba730b672dd
-SPOTIFY_CLIENT_SECRET=77ab6b409717461eb1d56996bd0b9243
+SPOTIFY_CLIENT_SECRET=7d91a789818a4115a2a6e1a5c0f4561c
 REDIRECT_URI=https://crescent-hub-server.onrender.com/callback
 
 SUPABASE_URL=https://sifcxfymkmlmbelzolbx.supabase.co
