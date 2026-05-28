@@ -916,24 +916,26 @@ async function monitorPlayback() {
     // ── 204 / nada tocando ────────────────────────────────
     if (r.status === 204 || !r.data?.item) {
       if (lastKnownSpotifyId) {
-        const { data: state } = await supabase
-          .from('player_state')
-          .select('current_spotify_id, is_playing, current_song_id')
-          .eq('id', 1).single();
+        // Verifica diretamente na fila se havia uma música marcada como playing
+        // (NÃO confia no is_playing do banco — pode já estar false por causa
+        //  do handler de pausa que dispara antes do 204 quando a música acaba)
+        const { data: playingSong } = await supabase
+          .from('queue')
+          .select('id')
+          .eq('status', 'playing')
+          .maybeSingle();
 
-        if (state?.is_playing === true && state?.current_spotify_id === lastKnownSpotifyId) {
-          if (state?.current_song_id) {
-            // Era uma música da fila → avança normalmente
-            console.log('🎵 Playback parou (204) — avançando fila...');
-            await advanceQueue('auto');
-          } else {
-            // Era faixa externa sem ID na fila → apenas limpa estado
-            await supabase.from('player_state').upsert({
-              id: 1, is_playing: false,
-              current_song_id: null, current_spotify_id: null,
-              updated_at: new Date().toISOString(),
-            });
-          }
+        if (playingSong) {
+          // Havia música da fila tocando → avança para a próxima
+          console.log('🎵 Playback parou (204) — avançando fila...');
+          await advanceQueue('auto');
+        } else {
+          // Nenhuma música da fila ou era faixa externa → limpa estado
+          await supabase.from('player_state').upsert({
+            id: 1, is_playing: false,
+            current_song_id: null, current_spotify_id: null,
+            updated_at: new Date().toISOString(),
+          });
         }
       }
       lastKnownSpotifyId = null;
