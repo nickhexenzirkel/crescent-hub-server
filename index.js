@@ -952,7 +952,19 @@ async function monitorPlayback() {
     // ── Pausado ───────────────────────────────────────────
     if (!is_playing) {
       if (wasPlaying) {
-        // Atualiza is_playing no banco sem avançar fila
+        // Verifica se a música terminou naturalmente (≤ 3s restantes)
+        // vs pausa manual do usuário (restam muitos segundos)
+        if (remaining <= 3000) {
+          // ✅ Fim natural — avança para próxima da fila
+          console.log(`🎵 Música terminou naturalmente (${remaining}ms restantes) — avançando fila...`);
+          wasPlaying         = false;
+          nearEndTriggered   = false;
+          lastKnownSpotifyId = null;
+          lastQueueSongId    = null;
+          await advanceQueue('auto');
+          return;
+        }
+        // Pausa manual — apenas atualiza o banco sem avançar
         await supabase.from('player_state').upsert({
           id: 1, is_playing: false,
           updated_at: new Date().toISOString(),
