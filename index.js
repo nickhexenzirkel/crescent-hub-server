@@ -840,6 +840,7 @@ let lastKnownSpotifyId = null;   // último ID visto no Spotify
 let lastQueueSongId    = null;   // último ID da fila Crescent que iniciamos
 let nearEndTriggered   = false;
 let wasPlaying         = false;
+let lastProgressMs     = 0;     // último progress_ms conhecido (atualizado durante playing)
 
 /** Formata ms → "3:45" */
 function fmtMs(ms) {
@@ -941,19 +942,27 @@ async function monitorPlayback() {
     // ── Pausado ───────────────────────────────────────────
     if (!is_playing) {
       if (wasPlaying) {
-        // Verifica se a música terminou naturalmente (≤ 3s restantes)
-        // vs pausa manual do usuário (restam muitos segundos)
-        if (remaining <= 3000) {
-          // ✅ Fim natural — avança para próxima da fila
-          console.log(`🎵 Música terminou naturalmente (${remaining}ms restantes) — avançando fila...`);
+        // Spotify congela progress_ms no último valor poll'd quando a música acaba.
+        // Por isso combinamos 3 sinais para detectar fim natural:
+        // 1. remaining atual ≤ 3s (progress chegou ao fim)
+        // 2. lastProgressMs estava ≤ 8s do fim no último tick playing
+        // 3. nearEndTriggered foi setado (estava ≤ 8s do fim)
+        const remainingAtLastPoll = item.duration_ms - lastProgressMs;
+        const songEndedNaturally  = remaining <= 3000
+                                 || (lastProgressMs > 0 && remainingAtLastPoll <= 8000)
+                                 || nearEndTriggered;
+
+        if (songEndedNaturally) {
+          console.log(`🎵 Música terminou (remaining=${remaining}ms, lastPoll=${remainingAtLastPoll}ms, nearEnd=${nearEndTriggered}) — avançando fila...`);
           wasPlaying         = false;
           nearEndTriggered   = false;
           lastKnownSpotifyId = null;
           lastQueueSongId    = null;
+          lastProgressMs     = 0;
           await advanceQueue('auto');
           return;
         }
-        // Pausa manual — apenas atualiza o banco sem avançar
+        // Pausa manual no meio da música
         await supabase.from('player_state').upsert({
           id: 1, is_playing: false,
           updated_at: new Date().toISOString(),
@@ -964,7 +973,8 @@ async function monitorPlayback() {
     }
 
     // ── Tocando ───────────────────────────────────────────
-    wasPlaying = true;
+    wasPlaying     = true;
+    lastProgressMs = progress_ms; // atualiza posição real a cada tick playing
 
     // ── Nova faixa detectada no Spotify ───────────────────
     if (lastKnownSpotifyId !== spotifyId) {
