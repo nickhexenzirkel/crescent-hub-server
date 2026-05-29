@@ -895,6 +895,39 @@ async function startPlaying(song) {
   console.log(`▶️  Tocando: ${song.title} — ${song.artist}`);
 }
 
+async function startAutoPlaylist() {
+  try {
+    const r = await spotify('get', '/me/playlists?limit=50');
+    const playlists = (r.data?.items || []).filter(p => p?.uri);
+
+    // Prioriza Daily Mix, Discover Weekly e Release Radar
+    const priority = playlists.filter(p =>
+      /daily mix|discover weekly|release radar|radar de lan/i.test(p.name)
+    );
+    const pool = priority.length > 0 ? priority : playlists;
+    if (pool.length === 0) { console.log('🎵 Nenhuma playlist disponível para auto-play.'); return; }
+
+    const chosen = pool[Math.floor(Math.random() * pool.length)];
+
+    const { data: devSetting } = await supabase
+      .from('settings').select('value').eq('key', 'device_id').single();
+    const deviceId = devSetting?.value;
+
+    // Embaralha antes de tocar
+    const shuffleUrl = `/me/player/shuffle?state=true${deviceId ? `&device_id=${deviceId}` : ''}`;
+    await spotify('put', shuffleUrl).catch(() => {});
+
+    const body = { context_uri: chosen.uri };
+    if (deviceId) body.device_id = deviceId;
+    await spotify('put', '/me/player/play', body);
+
+    const label = priority.length > 0 ? 'Daily Mix' : 'playlist aleatória';
+    console.log(`🎲 Auto-play: "${chosen.name}" (${label})`);
+  } catch (err) {
+    console.error('⚠️  Auto-playlist falhou:', err.response?.data?.error?.message || err.message);
+  }
+}
+
 async function advanceQueue(reason = 'auto') {
   // Pega o que estava tocando
   const { data: state } = await supabase
@@ -908,13 +941,14 @@ async function advanceQueue(reason = 'auto') {
 
   const next = await getNextSong();
   if (!next) {
-    // Fila acabou
+    // Fila acabou — toca playlist automática no Spotify
     await supabase.from('player_state').upsert({
       id: 1, is_playing: false,
       current_song_id: null, current_spotify_id: null,
       updated_at: new Date().toISOString(),
     });
-    console.log('🎵 Fila vazia — playback encerrado.');
+    console.log('🎵 Fila vazia — iniciando auto-play de playlist...');
+    await startAutoPlaylist();
     return;
   }
 
@@ -1012,12 +1046,14 @@ async function monitorPlayback() {
           console.log('🎵 Playback parou (204) — avançando fila...');
           await advanceQueue('auto');
         } else {
-          // Nenhuma música da fila ou era faixa externa → limpa estado
+          // Nenhuma música da fila (playlist externa acabou) → toca nova playlist
           await supabase.from('player_state').upsert({
             id: 1, is_playing: false,
             current_song_id: null, current_spotify_id: null,
             updated_at: new Date().toISOString(),
           });
+          console.log('🎵 Playback externo encerrado — iniciando auto-play de playlist...');
+          await startAutoPlaylist();
         }
       }
       lastKnownSpotifyId = null;
