@@ -797,18 +797,35 @@ app.post('/api/vote/skip', async (req, res) => {
 // GENRE — retorna genres do Spotify para uma faixa
 // ═══════════════════════════════════════════════════════
 
+// Cache em memória: evita chamar o Spotify mais de uma vez
+// para o mesmo track_id durante a vida do processo.
+const genreCache = new Map(); // track_id → string[]
+
 app.get('/api/genre', async (req, res) => {
   const { track_id } = req.query;
   if (!track_id) return res.status(400).json({ error: 'track_id obrigatório' });
+
+  // Retorna do cache sem tocar no Spotify
+  if (genreCache.has(track_id)) {
+    return res.json({ genres: genreCache.get(track_id) });
+  }
+
+  // Se rate limit ativo, não tenta — retorna vazio
+  if (Date.now() < rateLimitedUntil) {
+    return res.json({ genres: [] });
+  }
+
   try {
-    const trackR  = await spotify('get', `/tracks/${track_id}?market=BR`);
+    const trackR   = await spotify('get', `/tracks/${track_id}?market=BR`);
     const artistId = trackR.data.artists?.[0]?.id;
-    if (!artistId) return res.json({ genres: [] });
-    const artistR = await spotify('get', `/artists/${artistId}`);
-    res.json({ genres: artistR.data.genres || [] });
+    if (!artistId) { genreCache.set(track_id, []); return res.json({ genres: [] }); }
+    const artistR  = await spotify('get', `/artists/${artistId}`);
+    const genres   = artistR.data.genres || [];
+    genreCache.set(track_id, genres);
+    res.json({ genres });
   } catch (err) {
     console.error('❌ /api/genre:', err.response?.data || err.message);
-    res.json({ genres: [] });
+    res.json({ genres: [] }); // erros não são cacheados
   }
 });
 
