@@ -600,18 +600,28 @@ app.post('/api/queue', async (req, res) => {
   const { uri, spotify_id, title, artist, album_art, requested_by, duration_ms, duration_str, is_admin } = req.body;
   if (!uri || !title || !requested_by) return res.status(400).json({ error: 'Dados incompletos' });
 
-  // ── Limite de 2 músicas por colaborador (admin é ilimitado) ──
+  // ── Limite de 2 vagas por colaborador (admin é ilimitado) ──
+  // Músicas >= 15 min ocupam 2 vagas; abaixo disso, 1 vaga.
+  const SLOT_LIMIT  = 2;
+  const LONG_MS     = 15 * 60 * 1000;
+  const slotsNeeded = (duration_ms || 0) >= LONG_MS ? 2 : 1;
+
   if (!is_admin) {
     const { data: userSongs } = await supabase
       .from('queue')
-      .select('id')
+      .select('id, duration_ms')
       .eq('requested_by', requested_by)
       .in('status', ['pending', 'playing']);
 
-    if (userSongs && userSongs.length >= 2) {
-      return res.status(429).json({
-        error: 'Limite atingido! Você já tem 2 músicas na fila. Aguarde uma delas tocar para adicionar mais.',
-      });
+    const slotsUsed = (userSongs || []).reduce(
+      (acc, s) => acc + ((s.duration_ms || 0) >= LONG_MS ? 2 : 1), 0
+    );
+
+    if (slotsUsed + slotsNeeded > SLOT_LIMIT) {
+      const msg = slotsNeeded === 2
+        ? `Essa música tem mais de 15 minutos e ocupa as 2 vagas. Você não tem vagas disponíveis.`
+        : `Limite atingido! Você já tem ${slotsUsed}/2 vagas ocupadas. Aguarde uma música tocar para adicionar mais.`;
+      return res.status(429).json({ error: msg });
     }
   }
 
