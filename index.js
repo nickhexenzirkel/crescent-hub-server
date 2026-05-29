@@ -784,6 +784,25 @@ app.post('/api/vote/skip', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// GENRE — retorna genres do Spotify para uma faixa
+// ═══════════════════════════════════════════════════════
+
+app.get('/api/genre', async (req, res) => {
+  const { track_id } = req.query;
+  if (!track_id) return res.status(400).json({ error: 'track_id obrigatório' });
+  try {
+    const trackR  = await spotify('get', `/tracks/${track_id}?market=BR`);
+    const artistId = trackR.data.artists?.[0]?.id;
+    if (!artistId) return res.json({ genres: [] });
+    const artistR = await spotify('get', `/artists/${artistId}`);
+    res.json({ genres: artistR.data.genres || [] });
+  } catch (err) {
+    console.error('❌ /api/genre:', err.response?.data || err.message);
+    res.json({ genres: [] });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
 // DISPOSITIVOS SPOTIFY
 // ═══════════════════════════════════════════════════════
 
