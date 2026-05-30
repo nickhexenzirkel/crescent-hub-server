@@ -589,7 +589,8 @@ app.get('/login', (req, res) => {
     client_id:     CLIENT_ID,
     scope,
     redirect_uri:  REDIRECT_URI,
-    state: Math.random().toString(36).slice(2),
+    state:       Math.random().toString(36).slice(2),
+    show_dialog: 'true',
   });
 
   res.redirect(`https://accounts.spotify.com/authorize?${params}`);
