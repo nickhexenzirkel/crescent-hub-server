@@ -445,13 +445,23 @@ app.post('/api/alexa/ask', requireAuth, async (req, res) => {
   if (!question?.trim()) return res.status(400).json({ error: 'Pergunta obrigatória' });
   if (!alexaOk)           return res.status(503).json({ error: 'Alexa offline ou não configurada' });
 
-  const firstName   = (userName || 'Colaborador').split(' ')[0];
-  // Remove prefixo "Alexa," se o usuário digitou
+  const firstName     = (userName || 'Colaborador').split(' ')[0];
   const cleanQuestion = question.replace(/^alexa[,.\s]*/i, '').trim();
 
   const serial = process.env.ALEXA_DEVICE_SERIAL
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) return res.status(500).json({ error: 'Nenhum dispositivo Echo encontrado' });
+
+  // Verifica se há música tocando e pausa antes de enviar o comando
+  let wasPlaying = false;
+  try {
+    const playerCheck = await spotify('get', '/me/player/currently-playing').catch(() => null);
+    if (playerCheck?.data?.is_playing) {
+      wasPlaying = true;
+      await spotify('put', '/me/player/pause').catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
+    }
+  } catch {}
 
   try {
     await new Promise((resolve, reject) => {
@@ -459,10 +469,20 @@ app.post('/api/alexa/ask', requireAuth, async (req, res) => {
         if (err) reject(err); else resolve();
       });
     });
-    console.log(`🗣️  Alexa textcommand — ${firstName}: "${cleanQuestion}"`);
+    console.log(`🗣️  Alexa textcommand — ${firstName}: "${cleanQuestion}" (música pausada: ${wasPlaying})`);
+
+    // Retoma música após Alexa responder (~8s é tempo suficiente para respostas curtas)
+    if (wasPlaying) {
+      setTimeout(async () => {
+        await spotify('put', '/me/player/play').catch(() => {});
+      }, 8000);
+    }
+
     res.json({ ok: true, spoke: true });
   } catch (err) {
     console.error('❌ Alexa textcommand:', err.message);
+    // Retoma música se pausou e falhou
+    if (wasPlaying) spotify('put', '/me/player/play').catch(() => {});
     res.status(500).json({ error: 'Não foi possível enviar para a Alexa: ' + err.message });
   }
 });
