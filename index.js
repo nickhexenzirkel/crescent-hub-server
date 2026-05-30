@@ -1110,7 +1110,19 @@ app.post('/api/playlists', requireAuth, async (req, res) => {
     });
     console.log(`📋 Playlist criada: "${r.data.name}" por ${req.user.name}`);
     res.json({ playlist: { id: r.data.id, name: r.data.name } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error('❌ create playlist:', JSON.stringify(detail));
+    res.status(err.response?.status || 500).json({ error: JSON.stringify(detail) });
+  }
+});
+
+// Debug: mostra escopos do token atual
+app.get('/api/spotify/me', requireAuth, async (req, res) => {
+  try {
+    const r = await spotify('get', '/me');
+    res.json({ user: r.data.id, display_name: r.data.display_name, product: r.data.product });
+  } catch (err) { res.status(500).json({ error: err.response?.data || err.message }); }
 });
 
 app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
