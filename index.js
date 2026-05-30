@@ -1093,11 +1093,19 @@ const mapTrack = t => t ? ({
 
 app.get('/api/playlists', requireAuth, async (req, res) => {
   try {
-    const r = await spotify('get', '/me/playlists?limit=50');
-    res.json({ playlists: (r.data.items || []).map(p => ({
-      id: p.id, name: p.name, total: p.tracks.total,
-      image: p.images?.[0]?.url || null, owner: p.owner?.display_name,
-    }))});
+    const [plR, meR] = await Promise.all([
+      spotify('get', '/me/playlists?limit=50'),
+      spotify('get', '/me'),
+    ]);
+    const myId = meR.data.id;
+    // Retorna apenas playlists que o usuário é dono (pode modificar)
+    const playlists = (plR.data.items || [])
+      .filter(p => p && p.owner?.id === myId)
+      .map(p => ({
+        id: p.id, name: p.name, total: p.tracks?.total || 0,
+        image: p.images?.[0]?.url || null, owner: p.owner?.display_name,
+      }));
+    res.json({ playlists });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
