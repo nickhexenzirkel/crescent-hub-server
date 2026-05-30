@@ -214,6 +214,15 @@ app.get('/api/auth/profile', requireAuth, async (req, res) => {
   res.json({ profile: { ...safe, cpf: maskCpf(safe.cpf) } });
 });
 
+app.patch('/api/auth/profile', requireAuth, async (req, res) => {
+  const allowed = ['email','phone','street','district','city','state','cep'];
+  const updates = {};
+  allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+  const { error } = await supabase.from('employees').update(updates).eq('id', req.user.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
 app.put('/api/auth/change-password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Preencha senha atual e nova' });
@@ -351,6 +360,32 @@ app.put('/api/employees/:id/profile', requireAdmin, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════
+// COMUNICADOS
+// ════════════════════════════════════════════════════════
+
+app.get('/api/comunicados', async (req, res) => {
+  const { data, error } = await supabase.from('comunicados')
+    .select('*').eq('active', true).order('created_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ comunicados: data || [] });
+});
+
+app.post('/api/comunicados', requireAdmin, async (req, res) => {
+  const { title, body, cat, urgent } = req.body;
+  if (!title?.trim()) return res.status(400).json({ error: 'Título obrigatório' });
+  const { data, error } = await supabase.from('comunicados')
+    .insert({ title: title.trim(), body: body||'', cat: cat||'RH', urgent: !!urgent, created_by: req.user.name })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true, comunicado: data });
+});
+
+app.delete('/api/comunicados/:id', requireAdmin, async (req, res) => {
+  const { error } = await supabase.from('comunicados').update({ active: false }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
 // CALENDÁRIO DE EVENTOS
 // ════════════════════════════════════════════════════════
 
