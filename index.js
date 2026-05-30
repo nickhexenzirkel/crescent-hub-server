@@ -69,9 +69,12 @@ function initAlexa() {
   };
 
   if (hasRegData) {
-    // Token gerado pelo setup-alexa.js — mais estável, funciona com 2FA
     try {
-      config.formerRegistrationData = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
+      const reg = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
+      config.formerRegistrationData = reg;
+      if (reg.macDms)      config.macDms     = reg.macDms;
+      if (reg.amazonPage)  config.amazonPage = reg.amazonPage;
+      if (reg.localCookie) config.cookie     = reg.localCookie;
       console.log('🔑 Alexa: usando ALEXA_REGISTRATION_DATA');
     } catch {
       console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
