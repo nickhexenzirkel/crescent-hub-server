@@ -686,16 +686,19 @@ app.post('/api/queue', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   console.log(`➕ Queue: ${title} por ${requested_by} (pos ${position})`);
 
-  // ── Auto-start: dispara sempre que a fila estava vazia ──────
+  // ── Auto-start: dispara somente se nada está tocando ──────
   try {
     const { count: pendingCount } = await supabase
       .from('queue').select('id', { count: 'exact', head: true }).eq('status', 'pending');
 
     if (pendingCount === 1) {
-      const { data: playerState } = await supabase
-        .from('player_state').select('is_playing, current_song_id').eq('id', 1).single();
+      const [{ data: playerState }, { count: playingCount }] = await Promise.all([
+        supabase.from('player_state').select('is_playing, current_song_id').eq('id', 1).single(),
+        supabase.from('queue').select('id', { count: 'exact', head: true }).eq('status', 'playing'),
+      ]);
 
-      const somethingPlaying = playerState?.is_playing && playerState?.current_song_id;
+      // Considera ocupado se player_state diz tocando OU se há música com status 'playing' na fila
+      const somethingPlaying = (playerState?.is_playing && playerState?.current_song_id) || playingCount > 0;
 
       if (!somethingPlaying) {
         const { data: devSetting } = await supabase
