@@ -134,10 +134,16 @@ cron.schedule('* * * * *', async () => {
       if (!shouldFire) continue;
       console.log(`🔔 "${r.title}" — ${hhmm} — disparando Alexa...`);
       try {
-        await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
+        if (r.type === 'alexa') {
+          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
+          console.log(`✅ Alexa anunciou: "${r.title}"`);
+        } else {
+          const nType = r.type === 'aviso_urgente' ? 'aviso_urgente' : 'lembrete';
+          await supabase.from('notifications').insert({ type: nType, title: r.title, message: r.message || r.title, active: true });
+          console.log(`✅ Notificação "${nType}" disparada: "${r.title}"`);
+        }
         await supabase.from('reminders').update({ last_triggered: today }).eq('id', r.id);
-        console.log(`✅ Alexa anunciou: "${r.title}"`);
-      } catch (e) { console.error(`❌ Falha ao anunciar "${r.title}":`, e.message); }
+      } catch (e) { console.error(`❌ Falha ao disparar "${r.title}":`, e.message); }
     }
   } catch (e) { console.error('⚠️  Cron:', e.message); }
 });
@@ -426,6 +432,17 @@ app.get('/api/alexa/devices', requireAuth, (req, res) => {
     alexaDevices = data?.devices || [];
     res.json({ ok: true, devices: alexaDevices.map(d => ({ serial: d.serialNumber, name: d.accountName, type: d.deviceFamily })) });
   });
+});
+
+// Enviar notificação imediata (aviso_urgente ou lembrete)
+app.post('/api/notifications', requireAdmin, async (req, res) => {
+  const { type, title, message } = req.body;
+  if (!message?.trim()) return res.status(400).json({ error: 'message obrigatória' });
+  const { data, error } = await supabase.from('notifications')
+    .insert({ type: type || 'lembrete', title: title || null, message: message.trim(), active: true })
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true, notification: data });
 });
 
 // Testar anúncio imediatamente (admin)
