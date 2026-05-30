@@ -1125,19 +1125,23 @@ const getPlaylistAllTracks = async (playlistId) => {
 
 app.get('/api/playlists', requireAuth, async (req, res) => {
   try {
-    const [plR, meR] = await Promise.all([
-      spotify('get', '/me/playlists?limit=50'),
-      spotify('get', '/me'),
-    ]);
-    const myId = meR.data.id;
-    // Retorna apenas playlists que o usuário é dono (pode modificar)
-    const playlists = (plR.data.items || [])
-      .filter(p => p && p.owner?.id === myId)
-      .map(p => ({
-        id: p.id, name: p.name, total: p.tracks?.total || 0,
-        image: p.images?.[0]?.url || null, owner: p.owner?.display_name,
-      }));
-    res.json({ playlists });
+    const { data: playlists, error } = await supabase.from('playlists')
+      .select('*').order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    if (!playlists?.length) return res.json({ playlists: [] });
+
+    const { data: trackRows } = await supabase.from('playlist_tracks')
+      .select('playlist_id').in('playlist_id', playlists.map(p => p.id));
+    const countMap = {};
+    (trackRows || []).forEach(t => { countMap[t.playlist_id] = (countMap[t.playlist_id] || 0) + 1; });
+
+    res.json({
+      playlists: playlists.map(p => ({
+        id: p.id, name: p.name, created_by: p.created_by,
+        image: p.image_url || null,
+        total: countMap[p.id] || 0,
+      }))
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1148,13 +1152,25 @@ app.post('/api/playlists', requireAuth, async (req, res) => {
     const r = await spotify('post', '/me/playlists', {
       name: name.trim(), description: description || 'Criada pelo Uniko', public: false,
     });
+    const { data, error } = await supabase.from('playlists').insert({
+      id: r.data.id, name: r.data.name, created_by: req.user.name,
+    }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
     console.log(`📋 Playlist criada: "${r.data.name}" por ${req.user.name}`);
-    res.json({ playlist: { id: r.data.id, name: r.data.name } });
+    res.json({ playlist: { id: data.id, name: data.name, created_by: data.created_by, image: null, total: 0 } });
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('❌ create playlist:', JSON.stringify(detail));
     res.status(err.response?.status || 500).json({ error: JSON.stringify(detail) });
   }
+});
+
+app.patch('/api/playlists/:id/cover', requireAuth, async (req, res) => {
+  const { image_url } = req.body;
+  if (!image_url) return res.status(400).json({ error: 'image_url obrigatória' });
+  const { error } = await supabase.from('playlists').update({ image_url }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
 });
 
 // Debug público — testa acesso a playlist sem auth do Uniko
