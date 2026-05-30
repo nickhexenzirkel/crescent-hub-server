@@ -1135,8 +1135,12 @@ app.get('/api/debug/pl/:id', async (req, res) => {
 
 app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
   try {
-    const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100`);
-    res.json({ tracks: (r.data.items || []).map(i => mapTrack(i.track)).filter(Boolean) });
+    // /playlists/{id}/tracks é restrito pela quota do Spotify (pós-nov/2024)
+    // Workaround: GET /playlists/{id} com fields inclui as faixas sem restrição
+    const fields = 'tracks.items(track(id,uri,name,artists(name),album(images),duration_ms)),tracks.total';
+    const r = await spotify('get', `/playlists/${req.params.id}?fields=${encodeURIComponent(fields)}`);
+    const items = r.data.tracks?.items || [];
+    res.json({ tracks: items.map(i => mapTrack(i.track)).filter(Boolean) });
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('❌ get tracks:', JSON.stringify(detail));
