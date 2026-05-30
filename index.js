@@ -542,6 +542,8 @@ app.get('/login', (req, res) => {
     'playlist-read-private',
     'playlist-read-collaborative',
     'user-library-read',
+    'user-top-read',
+    'user-read-recently-played',
   ].join(' ');
 
   const params = new URLSearchParams({
@@ -1030,6 +1032,14 @@ app.post('/api/devices/wake', requireAuth, async (req, res) => {
 // FUNÇÕES INTERNAS
 // ═══════════════════════════════════════════════════════
 
+// Seleciona dispositivo preferindo sempre Echo/Spot sobre outros (iPhone, PC, etc.)
+function preferEchoDevice(devices) {
+  if (!devices?.length) return null;
+  return devices.find(d => /echo|spot|alexa/i.test(d.name))
+      || devices.find(d => d.is_active)
+      || devices[0];
+}
+
 async function getNextSong() {
   const { data } = await supabase
     .from('queue').select('*').eq('status', 'pending')
@@ -1060,9 +1070,7 @@ async function wakeSpotifyViaAlexa(song) {
     await new Promise(r => setTimeout(r, 3500));
 
     const devR = await spotify('get', '/me/player/devices').catch(() => null);
-    const device = devR?.data?.devices?.find(d => d.is_active)
-                || devR?.data?.devices?.find(d => /echo|spot/i.test(d.name))
-                || devR?.data?.devices?.[0];
+    const device = preferEchoDevice(devR?.data?.devices);
 
     if (device) {
       await supabase.from('settings').upsert({ key: 'device_id', value: device.id });
@@ -1084,12 +1092,11 @@ async function startPlaying(song) {
     .from('settings').select('value').eq('key', 'device_id').single();
   let deviceId = devSetting?.value;
 
-  // Se não há device_id salvo, descobre agora
+  // Se não há device_id salvo, descobre agora (sempre prefere Echo/Spot)
   if (!deviceId) {
     const devR = await spotify('get', '/me/player/devices').catch(() => null);
-    const devices = devR?.data?.devices || [];
-    if (devices.length > 0) {
-      const chosen = devices.find(d => d.is_active) || devices[0];
+    const chosen = preferEchoDevice(devR?.data?.devices);
+    if (chosen) {
       deviceId = chosen.id;
       await supabase.from('settings').upsert({ key: 'device_id', value: deviceId });
       console.log(`🔊 Dispositivo auto-selecionado: ${chosen.name}`);
@@ -1112,7 +1119,7 @@ async function startPlaying(song) {
     const devR = await spotify('get', '/me/player/devices').catch(() => null);
     const devices = devR?.data?.devices || [];
     if (devices.length > 0) {
-      const active = devices.find(d => d.is_active) || devices[0];
+      const active = preferEchoDevice(devices);
       deviceId = active.id;
       await supabase.from('settings').upsert({ key: 'device_id', value: deviceId });
       console.log(`🔊 Dispositivo redescoberto: ${active.name}`);
@@ -1160,33 +1167,30 @@ async function startPlaying(song) {
 
 async function startAutoPlaylist() {
   try {
-    // Usa as últimas músicas tocadas como semente para recomendações
-    const { data: recent } = await supabase
-      .from('queue').select('spotify_id')
-      .in('status', ['played', 'skipped'])
-      .not('spotify_id', 'is', null)
-      .order('created_at', { ascending: false })
-      .limit(5);
-
-    const seedTracks = [...new Set((recent || []).map(s => s.spotify_id).filter(Boolean))].slice(0, 5);
-
     let tracks = [];
 
-    if (seedTracks.length > 0) {
-      // Recomendações baseadas no histórico recente (igual ao autoplay do Spotify)
-      const params = new URLSearchParams({ seed_tracks: seedTracks.join(','), limit: 20, market: 'BR' });
-      const r = await spotify('get', `/recommendations?${params}`);
-      tracks = r.data?.tracks || [];
-    }
+    // 1ª opção: top tracks do usuário (personalizado, não depreciado)
+    try {
+      const r = await spotify('get', '/me/top/tracks?limit=50&time_range=medium_term');
+      const pool = r.data?.items || [];
+      // Embaralha para não tocar sempre na mesma ordem
+      tracks = pool.sort(() => Math.random() - 0.5).slice(0, 20);
+    } catch {}
 
+    // 2ª opção: histórico recente de reprodução
     if (tracks.length === 0) {
-      // Fallback: gêneros populares brasileiros
-      const params = new URLSearchParams({ seed_genres: 'pop,latin,brazilian', limit: 20, market: 'BR' });
-      const r = await spotify('get', `/recommendations?${params}`);
-      tracks = r.data?.tracks || [];
+      try {
+        const r = await spotify('get', '/me/player/recently-played?limit=50');
+        const seen = new Set();
+        tracks = (r.data?.items || [])
+          .map(i => i.track)
+          .filter(t => t && !seen.has(t.id) && seen.add(t.id))
+          .sort(() => Math.random() - 0.5)
+          .slice(0, 20);
+      } catch {}
     }
 
-    if (tracks.length === 0) { console.log('🎵 Sem recomendações disponíveis'); return; }
+    if (tracks.length === 0) { console.log('🎵 Sem faixas disponíveis para autoplay'); return; }
 
     // Embaralha e pega 6 faixas
     tracks = tracks.sort(() => Math.random() - 0.5).slice(0, 6);
