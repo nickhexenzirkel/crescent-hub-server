@@ -465,7 +465,7 @@ app.post('/api/alexa/ask', requireAuth, async (req, res) => {
 
   try {
     await new Promise((resolve, reject) => {
-      alexa.sendSequenceCommand(serial, 'textcommand', cleanQuestion, (err) => {
+      alexa.sendSequenceCommand(serial, 'textCommand', cleanQuestion, (err) => {
         if (err) reject(err); else resolve();
       });
     });
