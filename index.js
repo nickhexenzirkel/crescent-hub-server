@@ -363,13 +363,28 @@ app.delete('/api/events/:id', requireAdmin, async (req, res) => {
 });
 
 // ─── Spotify config ──────────────────────────────────────
-const CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID;
-const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
+let CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID     || '';
+let CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET || '';
 const REDIRECT_URI  = process.env.REDIRECT_URI || `http://localhost:${PORT}/callback`;
 const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 4;
 
 // Token em memória (persiste refresh_token no Supabase para sobreviver restarts)
 let tokens = { access: null, refresh: null, expiresAt: 0 };
+
+// Carrega credenciais Spotify salvas no Supabase (sobrepõe .env se existirem)
+async function loadSpotifyCredentials() {
+  try {
+    const { data } = await supabase
+      .from('settings').select('key, value')
+      .in('key', ['spotify_client_id', 'spotify_client_secret']);
+    for (const row of (data || [])) {
+      if (row.key === 'spotify_client_id'     && row.value) CLIENT_ID     = row.value;
+      if (row.key === 'spotify_client_secret' && row.value) CLIENT_SECRET = row.value;
+    }
+    if (CLIENT_ID) console.log(`🎵 Spotify: credenciais carregadas do Supabase (${CLIENT_ID.slice(0,8)}...)`);
+  } catch (e) { console.error('⚠️  loadSpotifyCredentials:', e.message); }
+}
+loadSpotifyCredentials();
 
 // ═══════════════════════════════════════════════════════
 // ════════════════════════════════════════════════════════
@@ -412,6 +427,37 @@ app.get('/api/image-proxy', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
     r.data.pipe(res);
   } catch { res.status(500).send('proxy error'); }
+});
+
+// ═══════════════════════════════════════════════════════
+// SPOTIFY CREDENTIALS — atualiza Client ID / Secret em runtime
+// ═══════════════════════════════════════════════════════
+
+app.get('/api/spotify/credentials', requireAdmin, (req, res) => {
+  res.json({
+    client_id:         CLIENT_ID ? `${CLIENT_ID.slice(0, 8)}••••` : null,
+    has_client_secret: !!CLIENT_SECRET,
+    has_refresh_token: !!tokens.refresh,
+  });
+});
+
+app.post('/api/spotify/credentials', requireAdmin, async (req, res) => {
+  const { client_id, client_secret } = req.body;
+  if (!client_id?.trim() || !client_secret?.trim())
+    return res.status(400).json({ error: 'client_id e client_secret obrigatórios' });
+
+  await supabase.from('settings').upsert({ key: 'spotify_client_id',     value: client_id.trim() });
+  await supabase.from('settings').upsert({ key: 'spotify_client_secret', value: client_secret.trim() });
+
+  CLIENT_ID     = client_id.trim();
+  CLIENT_SECRET = client_secret.trim();
+
+  // Invalida tokens para forçar re-autenticação com a nova conta
+  tokens = { access: null, refresh: null, expiresAt: 0 };
+  await supabase.from('settings').delete().eq('key', 'spotify_refresh_token');
+
+  console.log(`🔑 Spotify credenciais atualizadas (${CLIENT_ID.slice(0,8)}...) — re-auth necessário`);
+  res.json({ ok: true });
 });
 
 // SPOTIFY AUTH
