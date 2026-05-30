@@ -448,6 +448,42 @@ app.post('/api/alexa/ask', requireAuth, async (req, res) => {
   const firstName     = (userName || 'Colaborador').split(' ')[0];
   const cleanQuestion = question.replace(/^alexa[,.\s]*/i, '').trim();
 
+  // Detecta "tocar playlist X" e redireciona para o sistema de fila
+  const playlistMatch = cleanQuestion.match(/(?:tocar?|play|iniciar?|reproduzir?)\s+(?:a\s+)?playlist\s+["']?(.+?)["']?$/i);
+  if (playlistMatch) {
+    const searchName = playlistMatch[1].trim().toLowerCase();
+    try {
+      const r = await spotify('get', '/me/playlists?limit=50');
+      const playlists = r.data?.items || [];
+      const found = playlists.find(p =>
+        p.name.toLowerCase().includes(searchName) || searchName.includes(p.name.toLowerCase())
+      );
+      if (found) {
+        // Busca faixas e inicia pelo sistema de fila
+        const tr = await spotify('get', `/playlists/${found.id}/tracks?limit=100&market=BR`);
+        const tracks = (tr.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean);
+        if (tracks.length) {
+          await supabase.from('settings').upsert({ key: 'active_playlist_id',     value: found.id });
+          await supabase.from('settings').upsert({ key: 'active_playlist_name',   value: found.name });
+          await supabase.from('settings').upsert({ key: 'active_playlist_tracks', value: JSON.stringify(tracks) });
+          await supabase.from('settings').upsert({ key: 'active_playlist_pos',    value: '1' });
+          await supabase.from('queue').update({ status: 'removed' }).eq('status', 'pending').eq('requested_by', 'Autoplay 🎲');
+          const { data: maxPos } = await supabase.from('queue').select('position').in('status',['pending','playing']).order('position',{ascending:false}).limit(1);
+          const position = (maxPos?.[0]?.position ?? -1) + 1;
+          const first = tracks[0];
+          const { data: inserted } = await supabase.from('queue').insert({
+            spotify_uri: first.uri, spotify_id: first.id, title: first.title, artist: first.artist, album_art: first.album_art,
+            requested_by: `📋 ${found.name}`, duration_ms: first.duration_ms, duration_str: first.duration_str, position, status: 'pending',
+          }).select().single();
+          if (inserted) await startPlaying(inserted);
+          console.log(`📋 Alexa ask → playlist "${found.name}" iniciada por ${firstName}`);
+          return res.json({ ok: true, spoke: false, playlist: found.name });
+        }
+      }
+      return res.json({ ok: true, spoke: false, not_found: searchName });
+    } catch (e) { console.error('⚠️  playlist via alexa ask:', e.message); }
+  }
+
   const serial = process.env.ALEXA_DEVICE_SERIAL
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) return res.status(500).json({ error: 'Nenhum dispositivo Echo encontrado' });
@@ -541,6 +577,8 @@ app.get('/login', (req, res) => {
     'user-read-currently-playing',
     'playlist-read-private',
     'playlist-read-collaborative',
+    'playlist-modify-private',
+    'playlist-modify-public',
     'user-library-read',
     'user-top-read',
     'user-read-recently-played',
@@ -775,6 +813,15 @@ app.post('/api/queue', async (req, res) => {
       await supabase.from('queue').update({ status: 'removed' })
         .eq('status', 'pending').eq('requested_by', AUTOPLAY_TAG);
       console.log(`🗑️  ${autoPending} recomendação(ões) de autoplay removidas`);
+    }
+
+    // Remove playlist ativa pendente também
+    const { count: playlistPending } = await supabase
+      .from('queue').select('id', { count: 'exact', head: true })
+      .eq('status', 'pending').like('requested_by', '📋%');
+    if (playlistPending > 0) {
+      await supabase.from('queue').update({ status: 'removed' }).eq('status', 'pending').like('requested_by', '📋%');
+      await supabase.from('settings').delete().in('key', ['active_playlist_id','active_playlist_name','active_playlist_tracks','active_playlist_pos']);
     }
 
     // Verifica se só o autoplay estava tocando (sem música real na fila)
@@ -1029,6 +1076,104 @@ app.post('/api/devices/wake', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// PLAYLISTS
+// ═══════════════════════════════════════════════════════
+
+const fmtMsTrack = ms => `${Math.floor(ms/60000)}:${String(Math.floor((ms%60000)/1000)).padStart(2,'0')}`;
+
+const mapTrack = t => t ? ({
+  id: t.id, uri: t.uri, title: t.name,
+  artist: t.artists?.map(a => a.name).join(', ') || '',
+  album_art: t.album?.images?.[1]?.url || t.album?.images?.[0]?.url || null,
+  duration_ms: t.duration_ms,
+  duration_str: fmtMsTrack(t.duration_ms),
+}) : null;
+
+app.get('/api/playlists', requireAuth, async (req, res) => {
+  try {
+    const r = await spotify('get', '/me/playlists?limit=50');
+    res.json({ playlists: (r.data.items || []).map(p => ({
+      id: p.id, name: p.name, total: p.tracks.total,
+      image: p.images?.[0]?.url || null, owner: p.owner?.display_name,
+    }))});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/playlists', requireAuth, async (req, res) => {
+  const { name, description } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Nome obrigatório' });
+  try {
+    const me = await spotify('get', '/me');
+    const r  = await spotify('post', `/users/${me.data.id}/playlists`, {
+      name: name.trim(), description: description || 'Criada pelo Uniko', public: false,
+    });
+    console.log(`📋 Playlist criada: "${r.data.name}" por ${req.user.name}`);
+    res.json({ playlist: { id: r.data.id, name: r.data.name } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
+  try {
+    const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100&market=BR`);
+    res.json({ tracks: (r.data.items || []).map(i => mapTrack(i.track)).filter(Boolean) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
+  const { uris } = req.body;
+  if (!uris?.length) return res.status(400).json({ error: 'URIs obrigatórias' });
+  try {
+    await spotify('post', `/playlists/${req.params.id}/tracks`, { uris });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
+  const { uri } = req.body;
+  if (!uri) return res.status(400).json({ error: 'URI obrigatória' });
+  try {
+    await spotify('delete', `/playlists/${req.params.id}/tracks`, { tracks: [{ uri }] });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Inicia playlist pelo Uniko queue (uma música por vez)
+app.post('/api/playlists/:id/play', requireAuth, async (req, res) => {
+  const { name } = req.body;
+  try {
+    const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100&market=BR`);
+    const tracks = (r.data.items || []).map(i => mapTrack(i.track)).filter(Boolean);
+    if (!tracks.length) return res.status(404).json({ error: 'Playlist vazia' });
+
+    // Salva estado da playlist ativa no Supabase
+    await supabase.from('settings').upsert({ key: 'active_playlist_id',     value: req.params.id });
+    await supabase.from('settings').upsert({ key: 'active_playlist_name',   value: name || req.params.id });
+    await supabase.from('settings').upsert({ key: 'active_playlist_tracks', value: JSON.stringify(tracks) });
+    await supabase.from('settings').upsert({ key: 'active_playlist_pos',    value: '1' }); // próxima = índice 1
+
+    // Remove autoplay pendente
+    await supabase.from('queue').update({ status: 'removed' }).eq('status', 'pending').eq('requested_by', 'Autoplay 🎲');
+
+    // Insere e toca a primeira música
+    const first = tracks[0];
+    const { data: maxPos } = await supabase.from('queue').select('position').in('status', ['pending','playing']).order('position', { ascending: false }).limit(1);
+    const position = (maxPos?.[0]?.position ?? -1) + 1;
+
+    const { data: inserted } = await supabase.from('queue').insert({
+      spotify_uri: first.uri, spotify_id: first.id,
+      title: first.title, artist: first.artist, album_art: first.album_art,
+      requested_by: `📋 ${name || 'Playlist'}`,
+      duration_ms: first.duration_ms, duration_str: first.duration_str,
+      position, status: 'pending',
+    }).select().single();
+
+    if (inserted) await startPlaying(inserted);
+    console.log(`📋 Playlist "${name}" iniciada (${tracks.length} faixas)`);
+    res.json({ ok: true, total: tracks.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ═══════════════════════════════════════════════════════
 // FUNÇÕES INTERNAS
 // ═══════════════════════════════════════════════════════
 
@@ -1190,6 +1335,23 @@ async function startAutoPlaylist() {
       } catch {}
     }
 
+    // 3ª opção: playlists em destaque no Brasil (não precisa de escopos extras)
+    if (tracks.length === 0) {
+      try {
+        const r = await spotify('get', '/browse/featured-playlists?country=BR&limit=10&locale=pt_BR');
+        const playlists = (r.data?.playlists?.items || []).filter(p => p?.id);
+        if (playlists.length > 0) {
+          const chosen = playlists[Math.floor(Math.random() * playlists.length)];
+          const tr = await spotify('get', `/playlists/${chosen.id}/tracks?limit=50&market=BR`);
+          tracks = (tr.data?.items || [])
+            .map(i => i.track).filter(t => t?.uri)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 20);
+          console.log(`🎵 Autoplay: usando playlist "${chosen.name}"`);
+        }
+      } catch {}
+    }
+
     if (tracks.length === 0) { console.log('🎵 Sem faixas disponíveis para autoplay'); return; }
 
     // Embaralha e pega 6 faixas
@@ -1243,13 +1405,46 @@ async function advanceQueue(reason = 'auto') {
 
   const next = await getNextSong();
   if (!next) {
-    // Fila acabou — toca playlist automática no Spotify
     await supabase.from('player_state').upsert({
       id: 1, is_playing: false,
       current_song_id: null, current_spotify_id: null,
       updated_at: new Date().toISOString(),
     });
-    console.log('🎵 Fila vazia — iniciando auto-play de playlist...');
+
+    // Verifica se há playlist ativa continuando
+    const [{ data: plId }, { data: plPos }, { data: plTracks }, { data: plName }] = await Promise.all([
+      supabase.from('settings').select('value').eq('key', 'active_playlist_id').single(),
+      supabase.from('settings').select('value').eq('key', 'active_playlist_pos').single(),
+      supabase.from('settings').select('value').eq('key', 'active_playlist_tracks').single(),
+      supabase.from('settings').select('value').eq('key', 'active_playlist_name').single(),
+    ]);
+
+    if (plId?.value && plTracks?.value) {
+      try {
+        const tracks = JSON.parse(plTracks.value);
+        const pos    = parseInt(plPos?.value || '0');
+        if (pos < tracks.length) {
+          const track = tracks[pos];
+          await supabase.from('settings').upsert({ key: 'active_playlist_pos', value: String(pos + 1) });
+          const { data: maxPos } = await supabase.from('queue').select('position').in('status',['pending','playing']).order('position',{ascending:false}).limit(1);
+          const position = (maxPos?.[0]?.position ?? -1) + 1;
+          const { data: inserted } = await supabase.from('queue').insert({
+            spotify_uri: track.uri, spotify_id: track.id,
+            title: track.title, artist: track.artist, album_art: track.album_art,
+            requested_by: `📋 ${plName?.value || 'Playlist'}`,
+            duration_ms: track.duration_ms, duration_str: track.duration_str,
+            position, status: 'pending',
+          }).select().single();
+          if (inserted) { await startPlaying(inserted); return; }
+        } else {
+          // Playlist terminou — limpa estado
+          await supabase.from('settings').delete().in('key', ['active_playlist_id','active_playlist_name','active_playlist_tracks','active_playlist_pos']);
+          console.log(`📋 Playlist "${plName?.value}" terminou`);
+        }
+      } catch (e) { console.error('⚠️  active_playlist:', e.message); }
+    }
+
+    console.log('🎵 Fila vazia — iniciando autoplay...');
     await startAutoPlaylist();
     return;
   }
