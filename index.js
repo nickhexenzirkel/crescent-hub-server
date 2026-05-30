@@ -1125,17 +1125,17 @@ app.post('/api/playlists', requireAuth, async (req, res) => {
   }
 });
 
-// Debug: mostra escopos do token atual
-app.get('/api/spotify/me', requireAuth, async (req, res) => {
+// Debug público — testa acesso a playlist sem auth do Uniko
+app.get('/api/debug/pl/:id', async (req, res) => {
   try {
-    const r = await spotify('get', '/me');
-    res.json({ user: r.data.id, display_name: r.data.display_name, product: r.data.product });
-  } catch (err) { res.status(500).json({ error: err.response?.data || err.message }); }
+    const r = await spotify('get', `/playlists/${req.params.id}`);
+    res.json({ name: r.data.name, owner: r.data.owner?.id, total: r.data.tracks?.total });
+  } catch (err) { res.json({ error: err.response?.data, status: err.response?.status }); }
 });
 
 app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
   try {
-    const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100&market=BR`);
+    const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100`);
     res.json({ tracks: (r.data.items || []).map(i => mapTrack(i.track)).filter(Boolean) });
   } catch (err) {
     const detail = err.response?.data || err.message;
