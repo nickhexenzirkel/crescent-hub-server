@@ -8,6 +8,7 @@
     "dev": "nodemon index.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
     "@supabase/supabase-js": "^2.39.0",
     "alexa-remote2": "^8.0.4",
     "axios": "^1.6.0",
