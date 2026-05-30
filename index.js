@@ -1092,9 +1092,13 @@ const mapTrack = t => t ? ({
 }) : null;
 
 // Retorna faixas do Spotify + extras do Supabase (adicionados via Uniko), sem duplicatas
+// Se o Spotify falhar (429, token, rede), cai no Supabase em vez de 500
 const getPlaylistAllTracks = async (playlistId) => {
   const [spotifyR, { data: supabaseTracks }] = await Promise.all([
-    spotify('get', `/playlists/${playlistId}/tracks?limit=100&market=BR`),
+    spotify('get', `/playlists/${playlistId}/tracks?limit=100&market=BR`).catch(err => {
+      console.warn(`⚠️ Spotify tracks (${playlistId}):`, err.response?.data?.error?.message || err.message);
+      return { data: null };
+    }),
     supabase.from('playlist_tracks').select('*')
       .eq('playlist_id', playlistId).order('position', { ascending: true }),
   ]);
