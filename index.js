@@ -1138,7 +1138,11 @@ app.post('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
   try {
     await spotify('post', `/playlists/${req.params.id}/tracks`, { uris });
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error('❌ add tracks:', JSON.stringify(detail));
+    res.status(err.response?.status || 500).json({ error: JSON.stringify(detail) });
+  }
 });
 
 app.delete('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
