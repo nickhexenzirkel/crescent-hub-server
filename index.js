@@ -1091,6 +1091,25 @@ const mapTrack = t => t ? ({
   duration_str: fmtMsTrack(t.duration_ms),
 }) : null;
 
+// Retorna faixas do Spotify + extras do Supabase (adicionados via Uniko), sem duplicatas
+const getPlaylistAllTracks = async (playlistId) => {
+  const [spotifyR, { data: supabaseTracks }] = await Promise.all([
+    spotify('get', `/playlists/${playlistId}/tracks?limit=100&market=BR`),
+    supabase.from('playlist_tracks').select('*')
+      .eq('playlist_id', playlistId).order('position', { ascending: true }),
+  ]);
+  const spotifyTracks = (spotifyR.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean);
+  const spotifyUris = new Set(spotifyTracks.map(t => t.uri));
+  const supabaseExtra = (supabaseTracks || [])
+    .filter(t => !spotifyUris.has(t.spotify_uri))
+    .map(t => ({
+      id: t.spotify_id, uri: t.spotify_uri,
+      title: t.title, artist: t.artist, album_art: t.album_art,
+      duration_ms: t.duration_ms, duration_str: t.duration_str,
+    }));
+  return [...spotifyTracks, ...supabaseExtra];
+};
+
 app.get('/api/playlists', requireAuth, async (req, res) => {
   try {
     const [plR, meR] = await Promise.all([
@@ -1133,14 +1152,14 @@ app.get('/api/debug/pl/:id', async (req, res) => {
   } catch (err) { res.json({ error: err.response?.data, status: err.response?.status }); }
 });
 
-// Faixas guardadas no Supabase — Spotify restringe POST/DELETE /playlists/{id}/tracks pós-nov/2024
+// Faixas do Spotify + extras do Supabase (POST/DELETE via Spotify restrito pós-nov/2024)
 app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
-  const { data, error } = await supabase
-    .from('playlist_tracks').select('*')
-    .eq('playlist_id', req.params.id)
-    .order('position', { ascending: true });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ tracks: data || [] });
+  try {
+    const tracks = await getPlaylistAllTracks(req.params.id);
+    res.json({ tracks });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
@@ -1174,18 +1193,8 @@ app.delete('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
 app.post('/api/playlists/:id/play', requireAuth, async (req, res) => {
   const { name } = req.body;
   try {
-    const { data: tracks } = await supabase
-      .from('playlist_tracks').select('*')
-      .eq('playlist_id', req.params.id)
-      .order('position', { ascending: true });
-    if (!tracks?.length) return res.status(404).json({ error: 'Playlist vazia' });
-    // Adapta ao formato esperado
-    const tracksFormatted = tracks.map(t => ({
-      id: t.spotify_id, uri: t.spotify_uri, title: t.title,
-      artist: t.artist, album_art: t.album_art,
-      duration_ms: t.duration_ms, duration_str: t.duration_str,
-    }));
-    if (!tracks.length) return res.status(404).json({ error: 'Playlist vazia' });
+    const tracksFormatted = await getPlaylistAllTracks(req.params.id);
+    if (!tracksFormatted.length) return res.status(404).json({ error: 'Playlist vazia' });
 
     // Salva estado da playlist ativa no Supabase
     await supabase.from('settings').upsert({ key: 'active_playlist_id',     value: req.params.id });
@@ -1211,7 +1220,7 @@ app.post('/api/playlists/:id/play', requireAuth, async (req, res) => {
 
     if (inserted) await startPlaying(inserted);
     console.log(`📋 Playlist "${name}" iniciada (${tracksFormatted.length} faixas)`);
-    res.json({ ok: true, total: tracks.length });
+    res.json({ ok: true, total: tracksFormatted.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
