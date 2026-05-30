@@ -760,37 +760,44 @@ app.post('/api/queue', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   console.log(`➕ Queue: ${title} por ${requested_by} (pos ${position})`);
 
-  // ── Auto-start: dispara somente se nada está tocando ──────
+  // ── Gerenciamento de autoplay vs fila real ──────────────
   try {
-    const { count: pendingCount } = await supabase
-      .from('queue').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+    const AUTOPLAY_TAG = 'Autoplay 🎲';
 
-    if (pendingCount === 1) {
-      const [{ data: playerState }, { count: playingCount }] = await Promise.all([
-        supabase.from('player_state').select('is_playing, current_song_id').eq('id', 1).single(),
-        supabase.from('queue').select('id', { count: 'exact', head: true }).eq('status', 'playing'),
-      ]);
+    // Remove recomendações pendentes — usuário colocou música real
+    const { count: autoPending } = await supabase
+      .from('queue').select('id', { count: 'exact', head: true })
+      .eq('status', 'pending').eq('requested_by', AUTOPLAY_TAG);
 
-      // Considera ocupado se player_state diz tocando OU se há música com status 'playing' na fila
-      const somethingPlaying = (playerState?.is_playing && playerState?.current_song_id) || playingCount > 0;
-
-      if (!somethingPlaying) {
-        const { data: devSetting } = await supabase
-          .from('settings').select('value').eq('key', 'device_id').single();
-
-        if (!devSetting?.value) {
-          const devR = await spotify('get', '/me/player/devices').catch(() => null);
-          const devices = devR?.data?.devices || [];
-          if (devices.length > 0) {
-            await supabase.from('settings').upsert({ key: 'device_id', value: devices[0].id });
-            console.log(`🔊 Dispositivo auto-selecionado: ${devices[0].name}`);
-          }
-        }
-
-        await startPlaying(data);
-        console.log(`▶️  Auto-start: "${title}" — fila estava vazia`);
-      }
+    if (autoPending > 0) {
+      await supabase.from('queue').update({ status: 'removed' })
+        .eq('status', 'pending').eq('requested_by', AUTOPLAY_TAG);
+      console.log(`🗑️  ${autoPending} recomendação(ões) de autoplay removidas`);
     }
+
+    // Verifica se só o autoplay estava tocando (sem música real na fila)
+    const { data: playingAutoplay } = await supabase
+      .from('queue').select('id').eq('status', 'playing').eq('requested_by', AUTOPLAY_TAG)
+      .maybeSingle();
+
+    const [{ data: playerState }, { count: playingRealCount }] = await Promise.all([
+      supabase.from('player_state').select('is_playing, current_song_id').eq('id', 1).single(),
+      supabase.from('queue').select('id', { count: 'exact', head: true })
+        .eq('status', 'playing').neq('requested_by', AUTOPLAY_TAG),
+    ]);
+
+    const realMusicPlaying = (playerState?.is_playing && playerState?.current_song_id && playingRealCount > 0);
+
+    if (!realMusicPlaying) {
+      // Nada real tocando: inicia a música do usuário imediatamente
+      if (playingAutoplay) {
+        // Marca o autoplay atual como encerrado para startPlaying não confundir
+        await supabase.from('queue').update({ status: 'played' }).eq('id', playingAutoplay.id);
+      }
+      await startPlaying(data);
+      console.log(`▶️  Auto-start: "${title}" — ${playingAutoplay ? 'interrompeu autoplay' : 'fila estava vazia'}`);
+    }
+    // Se música real já estava tocando, a nova entra normalmente na fila
   } catch (err) {
     console.error('⚠️  Auto-start falhou:', err.response?.data?.error?.message || err.message);
   }
