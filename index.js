@@ -122,7 +122,8 @@ cron.schedule('* * * * *', async () => {
     const hhmm  = `${String(brt.getHours()).padStart(2,'0')}:${String(brt.getMinutes()).padStart(2,'0')}`;
     const today = brt.toISOString().split('T')[0];
     const { data: reminders } = await supabase
-      .from('reminders').select('*').eq('active', true).eq('time', hhmm).neq('last_triggered', today);
+      .from('reminders').select('*').eq('active', true).eq('time', hhmm)
+      .or(`last_triggered.is.null,last_triggered.neq.${today}`);
     for (const r of (reminders || [])) {
       const rDate = r.date ? new Date(r.date + 'T12:00:00') : null;
       const shouldFire =
