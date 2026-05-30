@@ -11,7 +11,6 @@ const jwt      = require('jsonwebtoken');
 const cron     = require('node-cron');
 const AlexaRemote = require('alexa-remote2');
 const { createClient } = require('@supabase/supabase-js');
-const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
 const app  = express();
@@ -28,10 +27,6 @@ const supabase = createClient(
 // ─── Auth config ─────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'crescent_secret';
 
-// ─── Anthropic (Claude) ───────────────────────────────────
-const anthropic = process.env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-  : null;
 
 const normCpf = (v) => String(v || '').replace(/\D/g, '');
 const maskCpf = (v) => {
@@ -422,40 +417,32 @@ app.post('/api/alexa/speak', requireAdmin, async (req, res) => {
   }
 });
 
-// Pergunta à Alexa com resposta gerada pelo Claude
+// Envia pergunta direto para a Alexa processar com inteligência nativa
 app.post('/api/alexa/ask', requireAuth, async (req, res) => {
   const { question, userName } = req.body;
   if (!question?.trim()) return res.status(400).json({ error: 'Pergunta obrigatória' });
+  if (!alexaOk)           return res.status(503).json({ error: 'Alexa offline ou não configurada' });
 
-  const firstName = (userName || 'Colaborador').split(' ')[0];
-  let responseText = '';
+  const firstName   = (userName || 'Colaborador').split(' ')[0];
+  // Remove prefixo "Alexa," se o usuário digitou
+  const cleanQuestion = question.replace(/^alexa[,.\s]*/i, '').trim();
 
-  if (anthropic) {
-    try {
-      const msg = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 180,
-        system: 'Você é a Alexa do sistema Uniko, assistente da empresa 7SERV. Responda de forma curta, clara e amigável em português brasileiro, adequada para ser falada em voz alta. Use no máximo 2 frases curtas. Não use emojis, asteriscos, bullet points ou qualquer formatação. Comece saudando o colaborador pelo primeiro nome.',
-        messages: [{ role: 'user', content: `${firstName} perguntou: ${question}` }],
+  const serial = process.env.ALEXA_DEVICE_SERIAL
+    || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
+  if (!serial) return res.status(500).json({ error: 'Nenhum dispositivo Echo encontrado' });
+
+  try {
+    await new Promise((resolve, reject) => {
+      alexa.sendSequenceCommand(serial, 'textcommand', cleanQuestion, (err) => {
+        if (err) reject(err); else resolve();
       });
-      responseText = msg.content[0]?.text?.trim() || '';
-    } catch (e) {
-      console.error('❌ Claude API:', e.message);
-      responseText = `Olá, ${firstName}! Não consegui processar sua pergunta agora. Tente novamente em instantes.`;
-    }
-  } else {
-    responseText = `Olá, ${firstName}! Recebi sua pergunta. Para ativar respostas inteligentes, configure a variável ANTHROPIC_API_KEY no servidor.`;
+    });
+    console.log(`🗣️  Alexa textcommand — ${firstName}: "${cleanQuestion}"`);
+    res.json({ ok: true, spoke: true });
+  } catch (err) {
+    console.error('❌ Alexa textcommand:', err.message);
+    res.status(500).json({ error: 'Não foi possível enviar para a Alexa: ' + err.message });
   }
-
-  // Fala no Echo Dot se disponível (sem await — não bloqueia a resposta)
-  let spoke = false;
-  if (alexaOk) {
-    speakOnAlexa(responseText).then(() => { spoke = true; }).catch(e => console.error('❌ Alexa speak:', e.message));
-    spoke = true;
-  }
-
-  console.log(`🗣️  Alexa ask — ${firstName}: "${question}" → "${responseText.slice(0, 60)}..."`);
-  res.json({ ok: true, response: responseText, spoke });
 });
 
 // Proxy de imagem — resolve CORS para extração de cores via Canvas
