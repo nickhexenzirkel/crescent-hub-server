@@ -1012,6 +1012,13 @@ app.post('/api/devices/select', async (req, res) => {
   }
 });
 
+// Força ativação do Echo Spot via Alexa (sem tocar música)
+app.post('/api/devices/wake', requireAuth, async (req, res) => {
+  const wokenId = await wakeSpotifyViaAlexa(null);
+  if (wokenId) res.json({ ok: true, device_id: wokenId });
+  else res.status(503).json({ error: 'Não foi possível ativar o Echo Spot' });
+});
+
 // ═══════════════════════════════════════════════════════
 // FUNÇÕES INTERNAS
 // ═══════════════════════════════════════════════════════
@@ -1021,6 +1028,44 @@ async function getNextSong() {
     .from('queue').select('*').eq('status', 'pending')
     .order('position', { ascending: true }).limit(1);
   return data?.[0] || null;
+}
+
+// Usa Alexa textCommand para acordar o Spotify no Echo Spot e retorna o device_id
+async function wakeSpotifyViaAlexa(song) {
+  if (!alexaOk) return null;
+  const echoSerial = process.env.ALEXA_DEVICE_SERIAL
+    || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
+  if (!echoSerial) return null;
+
+  try {
+    const cmd = song
+      ? `tocar ${song.title} de ${song.artist} no spotify`
+      : 'abrir spotify';
+
+    await new Promise((resolve, reject) => {
+      alexa.sendSequenceCommand(echoSerial, 'textCommand', cmd, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    console.log(`🎙️  Alexa wake: "${cmd}"`);
+
+    // Aguarda Echo Spot aparecer como dispositivo Spotify Connect ativo
+    await new Promise(r => setTimeout(r, 3500));
+
+    const devR = await spotify('get', '/me/player/devices').catch(() => null);
+    const device = devR?.data?.devices?.find(d => d.is_active)
+                || devR?.data?.devices?.find(d => /echo|spot/i.test(d.name))
+                || devR?.data?.devices?.[0];
+
+    if (device) {
+      await supabase.from('settings').upsert({ key: 'device_id', value: device.id });
+      console.log(`🔊 Echo Spot ativo via Alexa: ${device.name}`);
+      return device.id;
+    }
+  } catch (e) {
+    console.error('⚠️  wakeSpotifyViaAlexa:', e.message);
+  }
+  return null;
 }
 
 async function startPlaying(song) {
@@ -1068,9 +1113,25 @@ async function startPlaying(song) {
       await new Promise(r => setTimeout(r, 1000));
       await spotify('put', '/me/player/play', { uris: [song.spotify_uri], device_id: deviceId });
     } else {
-      console.error('❌ Nenhum dispositivo Spotify disponível.');
-      await supabase.from('queue').update({ status: 'pending' }).eq('id', song.id);
-      return;
+      // Último recurso: acorda o Echo Spot via Alexa e toca a música pela voz
+      console.log('🎙️  Nenhum dispositivo Connect — tentando via Alexa...');
+      const wokenId = await wakeSpotifyViaAlexa(song);
+      if (wokenId) {
+        // Echo Spot acordou — tenta Connect novamente com ele
+        await spotify('put', '/me/player', { device_ids: [wokenId], play: false }).catch(() => {});
+        await new Promise(r => setTimeout(r, 800));
+        try {
+          await spotify('put', '/me/player/play', { uris: [song.spotify_uri], device_id: wokenId });
+          deviceId = wokenId;
+        } catch {
+          // Alexa já está tocando a música pelo textCommand — o monitor vai sincronizar
+          console.log('▶️  Tocando via Alexa (textCommand)');
+        }
+      } else {
+        console.error('❌ Nenhum dispositivo Spotify disponível. Abra o Spotify em algum dispositivo.');
+        await supabase.from('queue').update({ status: 'pending' }).eq('id', song.id);
+        return;
+      }
     }
   }
 
