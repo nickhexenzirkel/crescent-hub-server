@@ -958,31 +958,43 @@ async function startPlaying(song) {
     .from('settings').select('value').eq('key', 'device_id').single();
   let deviceId = devSetting?.value;
 
-  // ── Tenta tocar diretamente (dispositivo geralmente ainda está ativo) ──
-  const playBody = { uris: [song.spotify_uri] };
-  if (deviceId) playBody.device_id = deviceId;
-
-  try {
-    await spotify('put', '/me/player/play', playBody);
-  } catch (playErr) {
-    // Play direto falhou → dispositivo pode estar dormindo
-    // Só aí tenta acordar (transferir + aguardar) e tentar de novo
-    console.warn('⚠️  Play falhou, tentando acordar dispositivo...', playErr.response?.data?.error?.message || playErr.message);
+  // Se não há device_id salvo, descobre agora
+  if (!deviceId) {
     const devR = await spotify('get', '/me/player/devices').catch(() => null);
     const devices = devR?.data?.devices || [];
+    if (devices.length > 0) {
+      const chosen = devices.find(d => d.is_active) || devices[0];
+      deviceId = chosen.id;
+      await supabase.from('settings').upsert({ key: 'device_id', value: deviceId });
+      console.log(`🔊 Dispositivo auto-selecionado: ${chosen.name}`);
+    }
+  }
 
+  // Se temos device_id, transfere o playback para acordar o dispositivo antes de tocar
+  if (deviceId) {
+    await spotify('put', '/me/player', { device_ids: [deviceId], play: false }).catch(() => {});
+    await new Promise(r => setTimeout(r, 800));
+  }
+
+  try {
+    const playBody = { uris: [song.spotify_uri] };
+    if (deviceId) playBody.device_id = deviceId;
+    await spotify('put', '/me/player/play', playBody);
+  } catch (playErr) {
+    console.warn('⚠️  Play falhou, tentando redescobrir dispositivo...', playErr.response?.data?.error?.message || playErr.message);
+    // Tenta redescobrir dispositivos (pode ter mudado)
+    const devR = await spotify('get', '/me/player/devices').catch(() => null);
+    const devices = devR?.data?.devices || [];
     if (devices.length > 0) {
       const active = devices.find(d => d.is_active) || devices[0];
       deviceId = active.id;
       await supabase.from('settings').upsert({ key: 'device_id', value: deviceId });
       console.log(`🔊 Dispositivo redescoberto: ${active.name}`);
-
-      // Acorda (transfere sem tocar) e aguarda Spotify responder
       await spotify('put', '/me/player', { device_ids: [deviceId], play: false }).catch(() => {});
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 1000));
       await spotify('put', '/me/player/play', { uris: [song.spotify_uri], device_id: deviceId });
     } else {
-      console.error('❌ Nenhum dispositivo Spotify disponível. Abra o Spotify em algum dispositivo.');
+      console.error('❌ Nenhum dispositivo Spotify disponível.');
       await supabase.from('queue').update({ status: 'pending' }).eq('id', song.id);
       return;
     }
