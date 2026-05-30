@@ -1050,32 +1050,67 @@ async function startPlaying(song) {
 
 async function startAutoPlaylist() {
   try {
-    const r = await spotify('get', '/me/playlists?limit=50');
-    const playlists = (r.data?.items || []).filter(p => p?.uri);
+    // Usa as últimas músicas tocadas como semente para recomendações
+    const { data: recent } = await supabase
+      .from('queue').select('spotify_id')
+      .in('status', ['played', 'skipped'])
+      .not('spotify_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(5);
 
-    // Prioriza Daily Mix, Discover Weekly e Release Radar
-    const priority = playlists.filter(p =>
-      /daily mix|discover weekly|release radar|radar de lan/i.test(p.name)
-    );
-    const pool = priority.length > 0 ? priority : playlists;
-    if (pool.length === 0) { console.log('🎵 Nenhuma playlist disponível para auto-play.'); return; }
+    const seedTracks = [...new Set((recent || []).map(s => s.spotify_id).filter(Boolean))].slice(0, 5);
 
-    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    let tracks = [];
 
-    const { data: devSetting } = await supabase
-      .from('settings').select('value').eq('key', 'device_id').single();
-    const deviceId = devSetting?.value;
+    if (seedTracks.length > 0) {
+      // Recomendações baseadas no histórico recente (igual ao autoplay do Spotify)
+      const params = new URLSearchParams({ seed_tracks: seedTracks.join(','), limit: 20, market: 'BR' });
+      const r = await spotify('get', `/recommendations?${params}`);
+      tracks = r.data?.tracks || [];
+    }
 
-    // Embaralha antes de tocar
-    const shuffleUrl = `/me/player/shuffle?state=true${deviceId ? `&device_id=${deviceId}` : ''}`;
-    await spotify('put', shuffleUrl).catch(() => {});
+    if (tracks.length === 0) {
+      // Fallback: gêneros populares brasileiros
+      const params = new URLSearchParams({ seed_genres: 'pop,latin,brazilian', limit: 20, market: 'BR' });
+      const r = await spotify('get', `/recommendations?${params}`);
+      tracks = r.data?.tracks || [];
+    }
 
-    const body = { context_uri: chosen.uri };
-    if (deviceId) body.device_id = deviceId;
-    await spotify('put', '/me/player/play', body);
+    if (tracks.length === 0) { console.log('🎵 Sem recomendações disponíveis'); return; }
 
-    const label = priority.length > 0 ? 'Daily Mix' : 'playlist aleatória';
-    console.log(`🎲 Auto-play: "${chosen.name}" (${label})`);
+    // Embaralha e pega 6 faixas
+    tracks = tracks.sort(() => Math.random() - 0.5).slice(0, 6);
+
+    // Calcula próximas posições na fila
+    const { data: maxPos } = await supabase
+      .from('queue').select('position')
+      .in('status', ['pending', 'playing'])
+      .order('position', { ascending: false }).limit(1);
+    let position = (maxPos?.[0]?.position ?? -1) + 1;
+
+    const fmtMs = ms => `${Math.floor(ms/60000)}:${String(Math.floor((ms%60000)/1000)).padStart(2,'0')}`;
+
+    // Insere todas as faixas na fila como pending
+    const rows = tracks.map((t, i) => ({
+      spotify_uri:  t.uri,
+      spotify_id:   t.id,
+      title:        t.name,
+      artist:       t.artists.map(a => a.name).join(', '),
+      album_art:    t.album.images[1]?.url || t.album.images[0]?.url || null,
+      requested_by: 'Autoplay 🎲',
+      duration_ms:  t.duration_ms,
+      duration_str: fmtMs(t.duration_ms),
+      position:     position + i,
+      status:       'pending',
+    }));
+
+    const { data: inserted } = await supabase.from('queue').insert(rows).select();
+
+    // Toca a primeira imediatamente
+    if (inserted?.[0]) {
+      await startPlaying(inserted[0]);
+      console.log(`🎲 Autoplay: ${inserted.length} recomendações adicionadas — tocando "${inserted[0].title}"`);
+    }
   } catch (err) {
     console.error('⚠️  Auto-playlist falhou:', err.response?.data?.error?.message || err.message);
   }
