@@ -1137,7 +1137,11 @@ app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
   try {
     const r = await spotify('get', `/playlists/${req.params.id}/tracks?limit=100&market=BR`);
     res.json({ tracks: (r.data.items || []).map(i => mapTrack(i.track)).filter(Boolean) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    const detail = err.response?.data || err.message;
+    console.error('❌ get tracks:', JSON.stringify(detail));
+    res.status(err.response?.status || 500).json({ error: JSON.stringify(detail) });
+  }
 });
 
 app.post('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
