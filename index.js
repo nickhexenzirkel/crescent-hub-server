@@ -51,19 +51,38 @@ let alexaOk      = false;
 let alexaDevices = [];
 
 function initAlexa() {
-  if (!process.env.AMAZON_EMAIL || !process.env.AMAZON_PASSWORD) {
-    console.log('⚠️  Alexa: configure AMAZON_EMAIL e AMAZON_PASSWORD no .env do Render');
+  const hasCredentials = process.env.AMAZON_EMAIL && process.env.AMAZON_PASSWORD;
+  const hasRegData     = !!process.env.ALEXA_REGISTRATION_DATA;
+
+  if (!hasCredentials && !hasRegData) {
+    console.log('⚠️  Alexa: configure AMAZON_EMAIL/AMAZON_PASSWORD ou ALEXA_REGISTRATION_DATA no Render');
     return;
   }
+
   alexa = new AlexaRemote();
-  alexa.init({
-    email:            process.env.AMAZON_EMAIL,
-    password:         process.env.AMAZON_PASSWORD,
+
+  const config = {
     alexaServiceHost: 'alexa.amazon.com',
     listeningPort:    0,
     useWsMqtt:        false,
     logger:           false,
-  }, (err) => {
+  };
+
+  if (hasRegData) {
+    // Token gerado pelo setup-alexa.js — mais estável, funciona com 2FA
+    try {
+      config.formerRegistrationData = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
+      console.log('🔑 Alexa: usando ALEXA_REGISTRATION_DATA');
+    } catch {
+      console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
+      return;
+    }
+  } else {
+    config.email    = process.env.AMAZON_EMAIL;
+    config.password = process.env.AMAZON_PASSWORD;
+  }
+
+  alexa.init(config, (err) => {
     if (err) { console.error('❌ Alexa init:', err.message); return; }
     alexaOk = true;
     console.log('🔊 Alexa Remote conectada!');
