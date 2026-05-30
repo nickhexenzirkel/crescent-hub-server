@@ -1092,19 +1092,28 @@ const mapTrack = t => t ? ({
 }) : null;
 
 // Retorna faixas do Spotify + extras do Supabase (adicionados via Uniko), sem duplicatas
-// Se o Spotify falhar (429, token, rede), cai no Supabase em vez de 500
+// Cada fonte tem try/catch próprio — a função nunca lança exceção nem retorna 500
 const getPlaylistAllTracks = async (playlistId) => {
-  const [spotifyR, { data: supabaseTracks }] = await Promise.all([
-    spotify('get', `/playlists/${playlistId}/tracks?limit=100&market=BR`).catch(err => {
-      console.warn(`⚠️ Spotify tracks (${playlistId}):`, err.response?.data?.error?.message || err.message);
-      return { data: null };
-    }),
-    supabase.from('playlist_tracks').select('*')
-      .eq('playlist_id', playlistId).order('position', { ascending: true }),
-  ]);
-  const spotifyTracks = (spotifyR.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean);
+  let spotifyTracks = [];
+  let supabaseTracks = [];
+
+  try {
+    const r = await spotify('get', `/playlists/${playlistId}/tracks?limit=100&market=BR`);
+    spotifyTracks = (r.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean);
+  } catch (err) {
+    console.warn(`⚠️ Spotify tracks (${playlistId}):`, err.response?.data?.error?.message || err.message);
+  }
+
+  try {
+    const { data } = await supabase.from('playlist_tracks').select('*')
+      .eq('playlist_id', playlistId).order('position', { ascending: true });
+    supabaseTracks = data || [];
+  } catch (err) {
+    console.warn(`⚠️ Supabase tracks (${playlistId}):`, err.message);
+  }
+
   const spotifyUris = new Set(spotifyTracks.map(t => t.uri));
-  const supabaseExtra = (supabaseTracks || [])
+  const supabaseExtra = supabaseTracks
     .filter(t => !spotifyUris.has(t.spotify_uri))
     .map(t => ({
       id: t.spotify_id, uri: t.spotify_uri,
