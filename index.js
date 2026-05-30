@@ -607,8 +607,9 @@ app.get('/callback', async (req, res) => {
       { headers: { Authorization: basicAuth(), 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
-    const { access_token, refresh_token, expires_in } = r.data;
+    const { access_token, refresh_token, expires_in, scope } = r.data;
     tokens = { access: access_token, refresh: refresh_token, expiresAt: Date.now() + (expires_in - 60) * 1000 };
+    console.log('🎵 Spotify autenticado. Escopos:', scope);
 
     // Persiste para sobreviver restart
     await supabase.from('settings').upsert({ key: 'spotify_refresh_token', value: refresh_token });
@@ -1104,8 +1105,7 @@ app.post('/api/playlists', requireAuth, async (req, res) => {
   const { name, description } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Nome obrigatório' });
   try {
-    const me = await spotify('get', '/me');
-    const r  = await spotify('post', `/users/${me.data.id}/playlists`, {
+    const r = await spotify('post', '/me/playlists', {
       name: name.trim(), description: description || 'Criada pelo Uniko', public: false,
     });
     console.log(`📋 Playlist criada: "${r.data.name}" por ${req.user.name}`);
