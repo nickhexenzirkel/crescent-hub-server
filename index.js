@@ -476,15 +476,19 @@ const SKIP_NEEDED   = parseInt(process.env.SKIP_VOTES_NEEDED) || 4;
 // Token em memória (persiste refresh_token no Supabase para sobreviver restarts)
 let tokens = { access: null, refresh: null, expiresAt: 0 };
 
+// Autoplay — carregado do Supabase, pode ser ligado/desligado em runtime
+let autoplayEnabled = true;
+
 // Carrega credenciais Spotify salvas no Supabase (sobrepõe .env se existirem)
 async function loadSpotifyCredentials() {
   try {
     const { data } = await supabase
       .from('settings').select('key, value')
-      .in('key', ['spotify_client_id', 'spotify_client_secret']);
+      .in('key', ['spotify_client_id', 'spotify_client_secret', 'autoplay_enabled']);
     for (const row of (data || [])) {
       if (row.key === 'spotify_client_id'     && row.value) CLIENT_ID     = row.value;
       if (row.key === 'spotify_client_secret' && row.value) CLIENT_SECRET = row.value;
+      if (row.key === 'autoplay_enabled') autoplayEnabled = row.value !== 'false';
     }
     if (CLIENT_ID) console.log(`🎵 Spotify: credenciais carregadas do Supabase (${CLIENT_ID.slice(0,8)}...)`);
   } catch (e) { console.error('⚠️  loadSpotifyCredentials:', e.message); }
@@ -1024,6 +1028,19 @@ app.post('/api/player/next', requireAdmin, async (req, res) => {
   }
 });
 
+// Autoplay on/off (admin only)
+app.get('/api/player/autoplay', requireAdmin, (req, res) => {
+  res.json({ enabled: autoplayEnabled });
+});
+
+app.post('/api/player/autoplay', requireAdmin, async (req, res) => {
+  const { enabled } = req.body;
+  autoplayEnabled = !!enabled;
+  await supabase.from('settings').upsert({ key: 'autoplay_enabled', value: String(autoplayEnabled) }, { onConflict: 'key' });
+  console.log(`🎵 Autoplay ${autoplayEnabled ? 'ativado ✅' : 'desativado 🚫'}`);
+  res.json({ ok: true, enabled: autoplayEnabled });
+});
+
 // Ajuste de volume (admin only)
 app.put('/api/player/volume', requireAdmin, async (req, res) => {
   const volume_percent = parseInt(req.query.volume_percent ?? req.body?.volume_percent);
@@ -1484,6 +1501,10 @@ async function startPlaying(song) {
 }
 
 async function startAutoPlaylist() {
+  if (!autoplayEnabled) {
+    console.log('🚫 Autoplay desativado — fila ficará vazia.');
+    return;
+  }
   try {
     let tracks = [];
 
