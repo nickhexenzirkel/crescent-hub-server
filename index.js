@@ -116,15 +116,31 @@ async function speakOnAlexa(text, opts = {}) {
 }
 
 // ── Cron: verifica lembretes a cada minuto (horário de Brasília) ──
+// Deduplicação via Set em memória — evita depender de last_triggered no banco.
+const firedReminders = new Set();
+
 cron.schedule('* * * * *', async () => {
   try {
     const brt   = new Date(Date.now() - 3 * 60 * 60 * 1000);
     const hhmm  = `${String(brt.getHours()).padStart(2,'0')}:${String(brt.getMinutes()).padStart(2,'0')}`;
     const today = brt.toISOString().split('T')[0];
-    const { data: reminders } = await supabase
-      .from('reminders').select('*').eq('active', true).eq('time', hhmm)
-      .or(`last_triggered.is.null,last_triggered.neq.${today}`);
+
+    // Limpa entradas do dia anterior para não acumular memória indefinidamente
+    if (hhmm === '00:01') firedReminders.clear();
+
+    const { data: reminders, error: qErr } = await supabase
+      .from('reminders').select('*').eq('active', true);
+
+    if (qErr) { console.error('⚠️  Cron query:', qErr.message); return; }
+
     for (const r of (reminders || [])) {
+      // Só processa reminders com horário definido que bate com agora
+      if (!r.time || r.time.slice(0, 5) !== hhmm) continue;
+
+      // Deduplicação: cada reminder dispara no máximo 1x por dia por horário
+      const fireKey = `${r.id}_${today}_${hhmm}`;
+      if (firedReminders.has(fireKey)) continue;
+
       const rDate = r.date ? new Date(r.date + 'T12:00:00') : null;
       const shouldFire =
         r.repeat === 'daily' ||
@@ -132,17 +148,20 @@ cron.schedule('* * * * *', async () => {
         (r.repeat === 'monthly' && rDate && rDate.getDate() === brt.getDate()) ||
         (r.repeat === 'never'   && r.date === today);
       if (!shouldFire) continue;
+
+      firedReminders.add(fireKey);
       console.log(`🔔 "${r.title}" — ${hhmm} — tipo: ${r.type}`);
+
       try {
         if (r.type === 'alexa') {
           await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
           console.log(`✅ Alexa anunciou: "${r.title}"`);
         } else if (r.type === 'personal') {
-          // Lembrete pessoal: cada cliente gerencia localmente via scheduler do frontend.
-          // Não inserir em notifications — evita vazar o aviso para outros usuários via realtime.
+          // Lembrete pessoal: o cliente de cada usuário gerencia localmente.
+          // Não inserir em notifications para não vazar para outros usuários via realtime.
           console.log(`⏭️  Pessoal ignorado pelo servidor: "${r.title}" (${r.created_by})`);
         } else {
-          // Broadcast do DashboardRH (lembrete ou aviso_urgente).
+          // Broadcast do DashboardRH.
           // aviso_urgente pode estar armazenado como 'lembrete' + prefixo __urgent__ na mensagem
           // (workaround para o check constraint da tabela reminders).
           const isUrgent = r.message?.startsWith('__urgent__');
@@ -153,7 +172,6 @@ cron.schedule('* * * * *', async () => {
           });
           console.log(`✅ Notificação "${nType}" disparada: "${r.title}"`);
         }
-        await supabase.from('reminders').update({ last_triggered: today }).eq('id', r.id);
       } catch (e) { console.error(`❌ Falha ao disparar "${r.title}":`, e.message); }
     }
   } catch (e) { console.error('⚠️  Cron:', e.message); }
