@@ -132,14 +132,25 @@ cron.schedule('* * * * *', async () => {
         (r.repeat === 'monthly' && rDate && rDate.getDate() === brt.getDate()) ||
         (r.repeat === 'never'   && r.date === today);
       if (!shouldFire) continue;
-      console.log(`🔔 "${r.title}" — ${hhmm} — disparando Alexa...`);
+      console.log(`🔔 "${r.title}" — ${hhmm} — tipo: ${r.type}`);
       try {
         if (r.type === 'alexa') {
           await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
           console.log(`✅ Alexa anunciou: "${r.title}"`);
+        } else if (r.type === 'personal') {
+          // Lembrete pessoal: cada cliente gerencia localmente via scheduler do frontend.
+          // Não inserir em notifications — evita vazar o aviso para outros usuários via realtime.
+          console.log(`⏭️  Pessoal ignorado pelo servidor: "${r.title}" (${r.created_by})`);
         } else {
-          const nType = r.type === 'aviso_urgente' ? 'aviso_urgente' : 'lembrete';
-          await supabase.from('notifications').insert({ type: nType, title: r.title, message: r.message || r.title, active: true });
+          // Broadcast do DashboardRH (lembrete ou aviso_urgente).
+          // aviso_urgente pode estar armazenado como 'lembrete' + prefixo __urgent__ na mensagem
+          // (workaround para o check constraint da tabela reminders).
+          const isUrgent = r.message?.startsWith('__urgent__');
+          const cleanMsg = isUrgent ? r.message.slice('__urgent__'.length) : r.message;
+          const nType    = (r.type === 'aviso_urgente' || isUrgent) ? 'aviso_urgente' : 'lembrete';
+          await supabase.from('notifications').insert({
+            type: nType, title: r.title, message: cleanMsg || r.title, active: true,
+          });
           console.log(`✅ Notificação "${nType}" disparada: "${r.title}"`);
         }
         await supabase.from('reminders').update({ last_triggered: today }).eq('id', r.id);
