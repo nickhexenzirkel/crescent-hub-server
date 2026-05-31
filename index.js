@@ -233,6 +233,17 @@ app.put('/api/auth/change-password', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// Lista pública de colegas (qualquer colaborador autenticado)
+app.get('/api/team', requireAuth, async (req, res) => {
+  const { data, error } = await supabase
+    .from('employees')
+    .select('id,name,role,cargo,active,admission')
+    .eq('active', true)
+    .order('name');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ employees: data });
+});
+
 // FUNCIONÁRIOS — CRUD (admin only)
 // ═══════════════════════════════════════════════════════
 
