@@ -227,7 +227,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!emp) return res.status(401).json({ error: 'CPF não encontrado ou conta inativa' });
   const ok = await bcrypt.compare(password, emp.password_hash);
   if (!ok) return res.status(401).json({ error: 'Senha incorreta' });
-  const token = jwt.sign({ id: emp.id, name: emp.name, cpf: emp.cpf, role: emp.role }, JWT_SECRET, { expiresIn: '10h' });
+  const token = jwt.sign({ id: emp.id, name: emp.name, cpf: emp.cpf, role: emp.role }, JWT_SECRET, { expiresIn: '7d' });
   console.log(`🔐 Login: ${emp.name} (${maskCpf(cpf)}) — ${emp.role}`);
   res.json({ token, user: { id: emp.id, name: emp.name, cpf: emp.cpf, role: emp.role } });
 });
