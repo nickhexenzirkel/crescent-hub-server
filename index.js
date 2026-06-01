@@ -277,19 +277,19 @@ app.get('/api/team', requireAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.get('/api/employees', requireAdmin, async (req, res) => {
-  const { data, error } = await supabase.from('employees').select('id,name,cpf,role,active,created_at,updated_at').order('name');
+  const { data, error } = await supabase.from('employees').select('id,name,cpf,role,cargo,active,created_at,updated_at').order('name');
   if (error) return res.status(500).json({ error: error.message });
   res.json({ employees: data.map(e => ({ ...e, cpf: maskCpf(e.cpf) })) });
 });
 
 app.post('/api/employees', requireAdmin, async (req, res) => {
-  const { name: n, cpf: rc, role = 'employee', password } = req.body;
+  const { name: n, cpf: rc, role = 'employee', cargo = '', password } = req.body;
   const name = (n || '').trim();
   const cpf  = normCpf(rc);
   if (!name)             return res.status(400).json({ error: 'Nome obrigatório' });
   if (cpf.length !== 11) return res.status(400).json({ error: 'CPF deve ter 11 dígitos' });
   const password_hash = await bcrypt.hash(normCpf(password || cpf), 10);
-  const { data, error } = await supabase.from('employees').insert({ name, cpf, password_hash, role, active: true }).select('id,name,cpf,role,active,created_at').single();
+  const { data, error } = await supabase.from('employees').insert({ name, cpf, password_hash, role, cargo: cargo.trim(), active: true }).select('id,name,cpf,role,cargo,active,created_at').single();
   if (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'CPF já cadastrado' });
     return res.status(500).json({ error: error.message });
@@ -299,10 +299,11 @@ app.post('/api/employees', requireAdmin, async (req, res) => {
 });
 
 app.put('/api/employees/:id', requireAdmin, async (req, res) => {
-  const { name, role, active } = req.body;
+  const { name, role, cargo, active } = req.body;
   const u = { updated_at: new Date().toISOString() };
   if (name   !== undefined) u.name   = name.trim();
   if (role   !== undefined) u.role   = role;
+  if (cargo  !== undefined) u.cargo  = cargo.trim();
   if (active !== undefined) u.active = active;
   const { data, error } = await supabase.from('employees').update(u).eq('id', req.params.id).select('id,name,cpf,role,active').single();
   if (error) return res.status(500).json({ error: error.message });
