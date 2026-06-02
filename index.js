@@ -937,14 +937,20 @@ app.post('/api/queue', async (req, res) => {
 
     const realMusicPlaying = (playerState?.is_playing && playerState?.current_song_id && playingRealCount > 0);
 
-    if (!realMusicPlaying) {
-      // Nada real tocando: inicia a música do usuário imediatamente
+    // Verifica o estado real do Spotify via cache do monitor (atualizado a cada 4s)
+    const cacheAge           = Date.now() - progressCache.at;
+    const spotifyReallyPlaying = progressCache.data?.is_playing === true && cacheAge < 10000;
+
+    if (!realMusicPlaying && !spotifyReallyPlaying) {
+      // Nada tocando de verdade: inicia a música do usuário imediatamente
       if (playingAutoplay) {
-        // Marca o autoplay atual como encerrado para startPlaying não confundir
         await supabase.from('queue').update({ status: 'played' }).eq('id', playingAutoplay.id);
       }
       await startPlaying(data);
       console.log(`▶️  Auto-start: "${title}" — ${playingAutoplay ? 'interrompeu autoplay' : 'fila estava vazia'}`);
+    } else if (!realMusicPlaying && spotifyReallyPlaying) {
+      // Spotify tocando (autoplay ou transição recente) — música vai para a fila normalmente
+      console.log(`🎵 Spotify tocando — "${title}" adicionada à fila`);
     }
     // Se música real já estava tocando, a nova entra normalmente na fila
   } catch (err) {
@@ -1752,6 +1758,7 @@ async function monitorPlayback() {
       lastQueueSongId    = null;
       nearEndTriggered   = false;
       wasPlaying         = false;
+      progressCache      = { data: { progress_ms: 0, is_playing: false }, at: Date.now() };
       return;
     }
 
@@ -1788,13 +1795,15 @@ async function monitorPlayback() {
           updated_at: new Date().toISOString(),
         });
       }
-      wasPlaying = false;
+      wasPlaying    = false;
+      progressCache = { data: { progress_ms: progress_ms || 0, is_playing: false }, at: Date.now() };
       return;
     }
 
     // ── Tocando ───────────────────────────────────────────
     wasPlaying     = true;
-    lastProgressMs = progress_ms; // atualiza posição real a cada tick playing
+    lastProgressMs = progress_ms;
+    progressCache  = { data: { progress_ms, is_playing: true }, at: Date.now() };
 
     // ── Nova faixa detectada no Spotify ───────────────────
     if (lastKnownSpotifyId !== spotifyId) {
