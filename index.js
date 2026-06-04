@@ -15,7 +15,8 @@ require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.options('*', cors());
 app.use(express.json());
 
 // ─── Supabase ────────────────────────────────────────────
@@ -2123,6 +2124,10 @@ app.post('/api/faturamento/consumo/download',
       category: category || 'fuel',
       downloadItems: JSON.parse(downloadItems || '[]'),
       outputPath,
+    }).catch(err => {
+      const j = fatJobs.get(jobId);
+      if (j) { j.status = 'error'; j.message = err.message; j.logs.push({ text: `Erro fatal: ${err.message}`, type: 'error' }); }
+      console.error('Faturamento error:', err);
     });
   }
 );
