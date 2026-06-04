@@ -1997,9 +1997,9 @@ async function runConsumoDownload({ jobId, username, password, startDate, endDat
     log(`${Object.keys(orgMap).length} organizações carregadas.`);
 
     // ── Find org UUID ──
-    const found = findOrgUUID(orgMap, clienteStrings[0] || '');
+    const found = findOrgUUID(orgMap, downloadItems[0]?.clienteStr || '');
     if (!found) {
-      const city = (clienteStrings[0] || '').split(' - ')[1] || '?';
+      const city = (downloadItems[0]?.clienteStr || '').split(' - ')[1] || '?';
       log(`Organização "${city}" não encontrada na lista. Verifique o nome.`, 'error');
       job.status = 'error'; await browser.close(); return;
     }
