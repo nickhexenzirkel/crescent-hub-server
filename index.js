@@ -1954,7 +1954,7 @@ function findOrgUUID(orgMap, exampleCliente) {
 }
 
 // ── Download PDFs for all secretarias of one municipality ──
-async function runConsumoDownload({ jobId, username, password, startDate, endDate, category, clienteStrings, outputPath }) {
+async function runConsumoDownload({ jobId, username, password, startDate, endDate, category, downloadItems, outputPath }) {
   const log = (text, type = 'normal') => fatLog(jobId, text, type);
   const job = fatJobs.get(jobId);
 
@@ -2000,37 +2000,65 @@ async function runConsumoDownload({ jobId, username, password, startDate, endDat
 
     let downloaded = 0;
 
-    for (const clienteStr of clienteStrings) {
-      const parts  = clienteStr.split(' - ');
+    for (const { clienteStr, setor } of downloadItems) {
+      const parts   = String(clienteStr).split(' - ');
       const secNome = parts[2]?.trim() || clienteStr;
+      const label   = setor ? `${secNome} / ${setor}` : secNome;
 
-      log(`Processando: ${secNome}...`);
+      log(`Processando: ${label}...`);
       try {
-        // Navigate to transactions_report
+        // Navigate to base page (with category + status + dates so dropdowns load correctly)
         await page.goto(
           `https://app.7beneficiosgestao.com.br/organizations/${found.uuid}/transactions_report` +
-          `?category=${category}&status=authorized`
+          `?category=${category}&status=authorized&starting_date=${encodeURIComponent(startDate)}&ending_date=${encodeURIComponent(endDate)}`
         );
         await page.waitForSelector('select', { timeout: 10000 });
 
-        // Read client dropdown options
-        const options = await page.evaluate(() => {
+        // ── Select client from custom dropdown ──
+        const clientOptions = await page.evaluate(() => {
           const sel = document.querySelector('.select select') || document.querySelector('select');
           return sel ? Array.from(sel.options).map(o => ({ value: o.value, text: o.text.trim() })) : [];
         });
 
-        const nSec  = normStr(secNome);
-        const match = options.find(o => normStr(o.text).includes(nSec));
-
-        if (!match?.value) {
+        const nSec       = normStr(secNome);
+        const clientMatch = clientOptions.find(o => normStr(o.text).includes(nSec));
+        if (!clientMatch?.value) {
           log(`Secretaria não encontrada no sistema: ${secNome}`, 'error'); continue;
         }
 
-        // Build URL with all filters
+        // Select client via native select (most reliable)
+        await page.evaluate((val) => {
+          const sel = document.querySelector('.select select') || document.querySelector('select');
+          if (sel) { sel.value = val; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+        }, clientMatch.value);
+        await page.waitForTimeout(600);
+
+        // ── Select sector if provided ──
+        let divisionId = '';
+        if (setor) {
+          const divOptions = await page.evaluate(() => {
+            const sel = document.querySelector('select[name="division_id"]');
+            return sel ? Array.from(sel.options).map(o => ({ value: o.value, text: o.text.trim() })) : [];
+          });
+          const nSetor   = normStr(setor);
+          const divMatch = divOptions.find(o => o.value && normStr(o.text).includes(nSetor));
+          if (divMatch?.value) {
+            await page.evaluate((val) => {
+              const sel = document.querySelector('select[name="division_id"]');
+              if (sel) { sel.value = val; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+            }, divMatch.value);
+            divisionId = divMatch.value;
+            await page.waitForTimeout(400);
+          } else {
+            log(`Setor "${setor}" não encontrado no sistema (continuando sem setor)`, 'normal');
+          }
+        }
+
+        // ── Navigate to URL with all params ──
         const params = new URLSearchParams({
-          client_id:     match.value,
+          client_id:     clientMatch.value,
           provider_id:   '',
-          division_id:   '',
+          division_id:   divisionId,
           category,
           product_id:    '',
           status:        'authorized',
@@ -2041,22 +2069,20 @@ async function runConsumoDownload({ jobId, username, password, startDate, endDat
         await page.goto(
           `https://app.7beneficiosgestao.com.br/organizations/${found.uuid}/transactions_report?${params}`
         );
-
-        // Wait for page to settle
         await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => null);
 
+        // ── Extract Relatório ──
         const extractBtn = page.getByRole('link', { name: 'Extrair Relatório' }).first();
-        const hasBtn = await extractBtn.isVisible().catch(() => false);
-        if (!hasBtn) { log(`Sem resultados para: ${secNome}`, 'normal'); continue; }
+        const hasBtn     = await extractBtn.isVisible().catch(() => false);
+        if (!hasBtn) { log(`Sem resultados para: ${label}`, 'normal'); continue; }
 
-        // Download
         const [, download] = await Promise.all([
           page.waitForEvent('popup').catch(() => null),
           page.waitForEvent('download', { timeout: 30000 }),
           extractBtn.click(),
         ]);
 
-        const safeName = secNome.replace(/[/\\?%*:|"<>]/g, '_').substring(0, 80);
+        const safeName = label.replace(/[/\\?%*:|"<>]/g, '_').substring(0, 100);
         const filePath  = nodePath.join(outDir, `${safeName}.pdf`);
         await download.saveAs(filePath);
 
@@ -2064,13 +2090,13 @@ async function runConsumoDownload({ jobId, username, password, startDate, endDat
         log(`✓ Salvo: ${safeName}.pdf`, 'ok');
 
       } catch (err) {
-        log(`Erro em "${secNome}": ${err.message}`, 'error');
+        log(`Erro em "${label}": ${err.message}`, 'error');
       }
     }
 
     job.status = 'done';
     job.total  = downloaded;
-    log(`Concluído! ${downloaded}/${clienteStrings.length} PDF(s) salvo(s) em ${outDir}`, 'ok');
+    log(`Concluído! ${downloaded}/${downloadItems.length} PDF(s) salvo(s) em ${outDir}`, 'ok');
 
   } catch (err) {
     log(`Erro inesperado: ${err.message}`, 'error');
@@ -2095,7 +2121,7 @@ app.post('/api/faturamento/consumo/download',
     runConsumoDownload({
       jobId, username, password, startDate, endDate,
       category: category || 'fuel',
-      clienteStrings: JSON.parse(clienteStrings || '[]'),
+      downloadItems: JSON.parse(downloadItems || '[]'),
       outputPath,
     });
   }
