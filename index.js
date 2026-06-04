@@ -1885,6 +1885,229 @@ setInterval(monitorPlayback, 4000);
 console.log('🔁 Monitor de playback iniciado (4s) — sincroniza Spotify + Alexa em tempo real');
 
 // ═══════════════════════════════════════════════════════
+// FATURAMENTO — Relatório de Consumo (7Benefícios)
+// ═══════════════════════════════════════════════════════
+const multer   = require('multer');
+const XLSX     = require('xlsx');
+const { chromium } = require('playwright');
+const nodePath = require('path');
+const nodeFs   = require('fs');
+const nodeOs   = require('os');
+
+const fatUpload = multer({ storage: multer.memoryStorage() });
+const fatJobs   = new Map(); // jobId → { status, logs, total, message }
+
+const fatLog = (jobId, text, type = 'normal') => {
+  const j = fatJobs.get(jobId);
+  if (j) j.logs.push({ text: `[${new Date().toLocaleTimeString('pt-BR')}] ${text}`, type });
+};
+
+const normStr = (s) =>
+  String(s || '').toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ').trim();
+
+// ── Scrape all organizations from 7Benefícios (infinite scroll) ──
+async function scrapeOrgs(page) {
+  await page.goto('https://app.7beneficiosgestao.com.br/organizations');
+  await page.waitForSelector('table tbody tr', { timeout: 15000 });
+
+  const orgMap = {};
+  let noChangeRounds = 0;
+  let lastCount = 0;
+
+  while (noChangeRounds < 3) {
+    const scraped = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('table tbody tr')).map(row => {
+        const name = row.querySelector('td')?.textContent?.trim();
+        const uuid = Array.from(row.querySelectorAll('a[href]'))
+          .map(a => a.getAttribute('href').match(/organizations\/([a-f0-9-]{36})/)?.[1])
+          .find(Boolean);
+        return name && uuid ? { name, uuid } : null;
+      }).filter(Boolean)
+    );
+    scraped.forEach(({ name, uuid }) => { orgMap[name] = uuid; });
+
+    const count = Object.keys(orgMap).length;
+    if (count === lastCount) noChangeRounds++;
+    else { noChangeRounds = 0; lastCount = count; }
+
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(900);
+  }
+  return orgMap;
+}
+
+// ── Match org UUID by municipality name extracted from "Cliente" column ──
+function findOrgUUID(orgMap, exampleCliente) {
+  const parts         = exampleCliente.split(' - ');
+  const municipioFull = parts[parts.length - 1]?.trim() || ''; // "MUNICIPIO DE JAGUARETAMA"
+  const cityName      = parts[1]?.trim() || '';                 // "JAGUARETAMA"
+  const nFull         = normStr(municipioFull);
+  const nCity         = normStr(cityName);
+
+  for (const [name, uuid] of Object.entries(orgMap)) {
+    const nName = normStr(name);
+    if (nName === nFull || (nCity && nName.includes(nCity))) return { uuid, orgName: name };
+  }
+  return null;
+}
+
+// ── Download PDFs for all secretarias of one municipality ──
+async function runConsumoDownload({ jobId, username, password, startDate, endDate, category, clienteStrings, outputPath }) {
+  const log = (text, type = 'normal') => fatLog(jobId, text, type);
+  const job = fatJobs.get(jobId);
+
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({ acceptDownloads: true });
+  const page    = await context.newPage();
+
+  try {
+    // ── Login ──
+    log('Acessando 7Benefícios...');
+    await page.goto('https://app.7beneficiosgestao.com.br/sessions/new');
+    await page.getByRole('textbox', { name: 'Nome de Usuário' }).fill(username);
+    await page.getByRole('textbox', { name: 'Senha' }).fill(password);
+    await page.getByRole('button', { name: 'Acessar' }).click();
+    await page.waitForFunction(() => !location.href.includes('sessions/new'), { timeout: 15000 })
+      .catch(() => null);
+
+    if (page.url().includes('sessions/new')) {
+      log('Login falhou. Verifique usuário e senha.', 'error');
+      job.status = 'error'; job.message = 'Login falhou';
+      await browser.close(); return;
+    }
+    log('Login realizado.', 'ok');
+
+    // ── Scrape orgs ──
+    log('Carregando organizações (pode levar alguns segundos)...');
+    const orgMap = await scrapeOrgs(page);
+    log(`${Object.keys(orgMap).length} organizações carregadas.`);
+
+    // ── Find org UUID ──
+    const found = findOrgUUID(orgMap, clienteStrings[0] || '');
+    if (!found) {
+      const city = (clienteStrings[0] || '').split(' - ')[1] || '?';
+      log(`Organização "${city}" não encontrada na lista. Verifique o nome.`, 'error');
+      job.status = 'error'; await browser.close(); return;
+    }
+    log(`Organização: ${found.orgName}`, 'ok');
+
+    // ── Ensure output folder ──
+    const outDir = outputPath?.trim()
+      || nodePath.join(nodeOs.homedir(), 'Downloads', 'RelatorioConsumo');
+    if (!nodeFs.existsSync(outDir)) nodeFs.mkdirSync(outDir, { recursive: true });
+
+    let downloaded = 0;
+
+    for (const clienteStr of clienteStrings) {
+      const parts  = clienteStr.split(' - ');
+      const secNome = parts[2]?.trim() || clienteStr;
+
+      log(`Processando: ${secNome}...`);
+      try {
+        // Navigate to transactions_report
+        await page.goto(
+          `https://app.7beneficiosgestao.com.br/organizations/${found.uuid}/transactions_report` +
+          `?category=${category}&status=authorized`
+        );
+        await page.waitForSelector('select', { timeout: 10000 });
+
+        // Read client dropdown options
+        const options = await page.evaluate(() => {
+          const sel = document.querySelector('.select select') || document.querySelector('select');
+          return sel ? Array.from(sel.options).map(o => ({ value: o.value, text: o.text.trim() })) : [];
+        });
+
+        const nSec  = normStr(secNome);
+        const match = options.find(o => normStr(o.text).includes(nSec));
+
+        if (!match?.value) {
+          log(`Secretaria não encontrada no sistema: ${secNome}`, 'error'); continue;
+        }
+
+        // Build URL with all filters
+        const params = new URLSearchParams({
+          client_id:     match.value,
+          provider_id:   '',
+          division_id:   '',
+          category,
+          product_id:    '',
+          status:        'authorized',
+          starting_date: startDate,
+          ending_date:   endDate,
+          license_plate: '',
+        });
+        await page.goto(
+          `https://app.7beneficiosgestao.com.br/organizations/${found.uuid}/transactions_report?${params}`
+        );
+
+        // Wait for page to settle
+        await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => null);
+
+        const extractBtn = page.getByRole('link', { name: 'Extrair Relatório' }).first();
+        const hasBtn = await extractBtn.isVisible().catch(() => false);
+        if (!hasBtn) { log(`Sem resultados para: ${secNome}`, 'normal'); continue; }
+
+        // Download
+        const [, download] = await Promise.all([
+          page.waitForEvent('popup').catch(() => null),
+          page.waitForEvent('download', { timeout: 30000 }),
+          extractBtn.click(),
+        ]);
+
+        const safeName = secNome.replace(/[/\\?%*:|"<>]/g, '_').substring(0, 80);
+        const filePath  = nodePath.join(outDir, `${safeName}.pdf`);
+        await download.saveAs(filePath);
+
+        downloaded++;
+        log(`✓ Salvo: ${safeName}.pdf`, 'ok');
+
+      } catch (err) {
+        log(`Erro em "${secNome}": ${err.message}`, 'error');
+      }
+    }
+
+    job.status = 'done';
+    job.total  = downloaded;
+    log(`Concluído! ${downloaded}/${clienteStrings.length} PDF(s) salvo(s) em ${outDir}`, 'ok');
+
+  } catch (err) {
+    log(`Erro inesperado: ${err.message}`, 'error');
+    job.status = 'error'; job.message = err.message;
+  } finally {
+    await browser.close();
+  }
+}
+
+// ── Routes ──
+app.post('/api/faturamento/consumo/download',
+  requireAuth,
+  fatUpload.fields([{ name: 'mainFile', maxCount: 1 }]),
+  async (req, res) => {
+    const { username, password, startDate, endDate, category, clienteStrings, outputPath } = req.body;
+    if (!req.files?.mainFile || !username || !password || !startDate || !endDate) {
+      return res.status(400).json({ error: 'Parâmetros obrigatórios ausentes' });
+    }
+    const jobId = require('crypto').randomUUID();
+    fatJobs.set(jobId, { status: 'running', logs: [], total: 0 });
+    res.json({ jobId });
+    runConsumoDownload({
+      jobId, username, password, startDate, endDate,
+      category: category || 'fuel',
+      clienteStrings: JSON.parse(clienteStrings || '[]'),
+      outputPath,
+    });
+  }
+);
+
+app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
+  const job = fatJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job não encontrado' });
+  res.json({ status: job.status, logs: job.logs, total: job.total, message: job.message });
+});
+
+// ═══════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════
 
