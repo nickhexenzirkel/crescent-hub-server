@@ -3,6 +3,17 @@
 // Spotify + Auth + Alexa TTS + Lembretes programados
 // ════════════════════════════════════════════════════════
 
+// Garante que o Chromium do Playwright esteja instalado antes de subir
+try {
+  require('child_process').execSync('npx playwright install chromium', {
+    stdio: 'inherit',
+    timeout: 180000,
+  });
+  console.log('🎭 Playwright Chromium pronto.');
+} catch (err) {
+  console.warn('⚠️  playwright install aviso:', err.message);
+}
+
 const express  = require('express');
 const cors     = require('cors');
 const axios    = require('axios');
