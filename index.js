@@ -2111,7 +2111,7 @@ app.post('/api/faturamento/consumo/download',
   requireAuth,
   fatUpload.fields([{ name: 'mainFile', maxCount: 1 }]),
   async (req, res) => {
-    const { username, password, startDate, endDate, category, clienteStrings, outputPath } = req.body;
+    const { username, password, startDate, endDate, category, downloadItems, outputPath } = req.body;
     if (!req.files?.mainFile || !username || !password || !startDate || !endDate) {
       return res.status(400).json({ error: 'Parâmetros obrigatórios ausentes' });
     }
