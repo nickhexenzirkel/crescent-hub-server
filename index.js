@@ -768,7 +768,7 @@ async function ensureToken() {
 // Implementa backoff automático quando recebe 429 (rate limit)
 let rateLimitedUntil = 0;
 
-async function spotify(method, path, data, { retries = 1 } = {}) {
+async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
   if (Date.now() < rateLimitedUntil) {
     const waitSec = Math.round((rateLimitedUntil - Date.now()) / 1000);
     throw Object.assign(new Error(`Rate limit ativo — aguardando ${waitSec}s`), { response: { status: 429 } });
@@ -787,11 +787,12 @@ async function spotify(method, path, data, { retries = 1 } = {}) {
       rateLimitedUntil = Date.now() + retryAfter * 1000;
       console.warn(`⏸  Rate limit Spotify — pausando chamadas por ${retryAfter}s`);
     }
-    // Retry automático para erros 5xx transitórios do Spotify (502, 503, 504)
+    // Retry com backoff exponencial para erros 5xx transitórios (502, 503, 504)
     if (retries > 0 && err.response?.status >= 500) {
-      console.warn(`⚠️  Spotify ${err.response.status} em ${path} — tentando novamente...`);
-      await new Promise(r => setTimeout(r, 1500));
-      return spotify(method, path, data, { retries: retries - 1 });
+      const delay = 1500 * Math.pow(2, _attempt); // 1.5s, 3s, 6s...
+      console.warn(`⚠️  Spotify ${err.response.status} em ${path} — retry ${_attempt + 1} em ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+      return spotify(method, path, data, { retries: retries - 1, _attempt: _attempt + 1 });
     }
     throw err;
   }
@@ -842,23 +843,34 @@ app.get('/api/progress', async (req, res) => {
 // BUSCA DE MÚSICAS
 // ═══════════════════════════════════════════════════════
 
+const mapSearchTrack = t => ({
+  id:           t.id,
+  uri:          t.uri,
+  title:        t.name,
+  artist:       t.artists.map(a => a.name).join(', '),
+  album:        t.album.name,
+  album_art:    t.album.images[1]?.url || t.album.images[0]?.url || null,
+  duration_ms:  t.duration_ms,
+  duration_str: `${Math.floor(t.duration_ms / 60000)}:${String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}`,
+});
+
 app.get('/api/search', async (req, res) => {
   const { q } = req.query;
   if (!q?.trim()) return res.status(400).json({ error: 'Query vazia' });
 
+  const qEnc = encodeURIComponent(q);
   try {
-    const r = await spotify('get', `/search?q=${encodeURIComponent(q)}&type=track&limit=8&market=BR`);
-    const tracks = r.data.tracks.items.map(t => ({
-      id:           t.id,
-      uri:          t.uri,
-      title:        t.name,
-      artist:       t.artists.map(a => a.name).join(', '),
-      album:        t.album.name,
-      album_art:    t.album.images[1]?.url || t.album.images[0]?.url || null,
-      duration_ms:  t.duration_ms,
-      duration_str: `${Math.floor(t.duration_ms / 60000)}:${String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}`,
-    }));
-    res.json({ tracks });
+    // Tenta com market=BR primeiro; se falhar com 5xx, tenta sem market (fallback)
+    let r;
+    try {
+      r = await spotify('get', `/search?q=${qEnc}&type=track&limit=8&market=BR`);
+    } catch (innerErr) {
+      if (innerErr.response?.status >= 500) {
+        console.warn('⚠️  Search com market=BR falhou — tentando sem market');
+        r = await spotify('get', `/search?q=${qEnc}&type=track&limit=8`);
+      } else throw innerErr;
+    }
+    res.json({ tracks: r.data.tracks.items.map(mapSearchTrack) });
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data?.error?.message || err.message;
