@@ -768,7 +768,7 @@ async function ensureToken() {
 // Implementa backoff automático quando recebe 429 (rate limit)
 let rateLimitedUntil = 0;
 
-async function spotify(method, path, data) {
+async function spotify(method, path, data, { retries = 1 } = {}) {
   if (Date.now() < rateLimitedUntil) {
     const waitSec = Math.round((rateLimitedUntil - Date.now()) / 1000);
     throw Object.assign(new Error(`Rate limit ativo — aguardando ${waitSec}s`), { response: { status: 429 } });
@@ -786,6 +786,12 @@ async function spotify(method, path, data) {
       const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '60');
       rateLimitedUntil = Date.now() + retryAfter * 1000;
       console.warn(`⏸  Rate limit Spotify — pausando chamadas por ${retryAfter}s`);
+    }
+    // Retry automático para erros 5xx transitórios do Spotify (502, 503, 504)
+    if (retries > 0 && err.response?.status >= 500) {
+      console.warn(`⚠️  Spotify ${err.response.status} em ${path} — tentando novamente...`);
+      await new Promise(r => setTimeout(r, 1500));
+      return spotify(method, path, data, { retries: retries - 1 });
     }
     throw err;
   }
@@ -854,8 +860,12 @@ app.get('/api/search', async (req, res) => {
     }));
     res.json({ tracks });
   } catch (err) {
-    console.error('❌ Search:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Erro na busca. Spotify autenticado?' });
+    const status = err.response?.status;
+    const detail = err.response?.data?.error?.message || err.message;
+    console.error(`❌ Search (HTTP ${status}):`, detail);
+    if (status === 401) return res.status(401).json({ error: 'Spotify não autenticado. Acesse /login para reconectar.' });
+    if (status >= 500) return res.status(502).json({ error: `Spotify indisponível (${status}). Tente novamente em instantes.` });
+    res.status(500).json({ error: `Erro na busca: ${detail}` });
   }
 });
 
