@@ -1926,7 +1926,7 @@ async function monitorPlayback() {
 
   } catch (err) {
     const status = err.response?.status;
-    if (status && [401, 404, 429].includes(status)) return;
+    if (status && [400, 401, 404, 429].includes(status)) return;
     console.error('⚠️  Monitor:', err.response?.data?.error?.message || err.message);
   }
 }
