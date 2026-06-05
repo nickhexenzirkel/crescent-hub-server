@@ -93,7 +93,15 @@ function initAlexa() {
   }
 
   alexa.init(config, (err) => {
-    if (err) { console.error('❌ Alexa init:', err.message); return; }
+    if (err) {
+      // Ignora erro de login por browser (registration data expirada) — não polui logs
+      if (err.message?.includes('open http')) {
+        console.warn('⚠️  Alexa: registration data expirada. Regere ALEXA_REGISTRATION_DATA no Render.');
+      } else {
+        console.error('❌ Alexa init:', err.message);
+      }
+      return;
+    }
     alexaOk = true;
     console.log('🔊 Alexa Remote conectada!');
     alexa.getDevices((e, data) => {
@@ -843,6 +851,10 @@ app.get('/api/progress', async (req, res) => {
 // BUSCA DE MÚSICAS
 // ═══════════════════════════════════════════════════════
 
+// Cache de busca — evita múltiplos hits no Spotify para a mesma query em 60s
+const searchCache = new Map();
+const SEARCH_CACHE_TTL = 60_000;
+
 const mapSearchTrack = t => ({
   id:           t.id,
   uri:          t.uri,
@@ -858,11 +870,28 @@ app.get('/api/search', async (req, res) => {
   const { q } = req.query;
   if (!q?.trim()) return res.status(400).json({ error: 'Query vazia' });
 
+  const key = q.trim().toLowerCase();
+
+  // Retorna do cache se ainda válido
+  const cached = searchCache.get(key);
+  if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL) {
+    return res.json({ tracks: cached.tracks });
+  }
+
   const qEnc = encodeURIComponent(q);
   try {
-    // Busca sem market (mais estável); market=BR causa 502 sistemático no CDN do Spotify
     const r = await spotify('get', `/search?q=${qEnc}&type=track&limit=8`);
-    res.json({ tracks: r.data.tracks.items.map(mapSearchTrack) });
+    const tracks = r.data.tracks.items.map(mapSearchTrack);
+
+    // Salva no cache e limpa entradas velhas
+    searchCache.set(key, { tracks, at: Date.now() });
+    if (searchCache.size > 300) {
+      const now = Date.now();
+      for (const [k, v] of searchCache)
+        if (now - v.at > SEARCH_CACHE_TTL) searchCache.delete(k);
+    }
+
+    res.json({ tracks });
   } catch (err) {
     const status = err.response?.status;
     const detail = err.response?.data?.error?.message || err.message;
