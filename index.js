@@ -14,8 +14,22 @@ execCP('npx playwright install chromium', (err) => {
 });
 
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
-const YTDLP_BIN = '/tmp/yt-dlp';
-let ytdlpReady = false;
+const YTDLP_BIN     = '/tmp/yt-dlp';
+const YTCOOKIES_FILE = '/tmp/yt-cookies.txt';
+let ytdlpReady   = false;
+let ytCookiesOk  = false;
+
+// Escreve cookies do env var em arquivo (necessário para IPs de cloud)
+if (process.env.YOUTUBE_COOKIES) {
+  try {
+    fs.writeFileSync(YTCOOKIES_FILE, process.env.YOUTUBE_COOKIES, 'utf8');
+    ytCookiesOk = true;
+    console.log('🍪 YouTube cookies carregados do ambiente.');
+  } catch(e) {
+    console.warn('⚠️  Não foi possível salvar cookies:', e.message);
+  }
+}
+
 (function ensureYtDlp() {
   execCP(`${YTDLP_BIN} --version`, (err) => {
     if (!err) { ytdlpReady = true; console.log('🎵 yt-dlp pronto.'); return; }
@@ -2240,14 +2254,20 @@ app.post('/api/ytdl/download', (req, res) => {
   ytdlpJobs.set(videoId, job);
   scheduleVideoCleanup(videoId, outPath);
 
-  const proc = spawn(YTDLP_BIN, [
+  const ytdlpArgs = [
     '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo',
     '--no-playlist', '--no-part', '--no-warnings',
     '--extractor-args', 'youtube:player_client=android,web',
     '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
-    '-o', outPath,
-    `https://www.youtube.com/watch?v=${videoId}`
-  ]);
+  ];
+  if (ytCookiesOk) {
+    ytdlpArgs.push('--cookies', YTCOOKIES_FILE);
+    console.log(`🍪 usando cookies para ${videoId}`);
+  } else {
+    console.warn(`⚠️  sem cookies — download pode falhar para ${videoId}`);
+  }
+  ytdlpArgs.push('-o', outPath, `https://www.youtube.com/watch?v=${videoId}`);
+  const proc = spawn(YTDLP_BIN, ytdlpArgs);
   let stderrBuf = '';
   proc.stderr.on('data', (d) => { stderrBuf += d.toString(); });
   proc.stdout.on('data', (d) => console.log(`yt-dlp [${videoId}]:`, d.toString().trim()));
