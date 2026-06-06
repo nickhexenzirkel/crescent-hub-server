@@ -3,8 +3,12 @@
 // Spotify + Auth + Alexa TTS + Lembretes programados
 // ════════════════════════════════════════════════════════
 
+const { spawn, exec: execCP } = require('child_process');
+const path     = require('path');
+const fs       = require('fs');
+
 // Instala Chromium em segundo plano para não bloquear a inicialização do servidor
-require('child_process').exec('npx playwright install chromium', (err) => {
+execCP('npx playwright install chromium', (err) => {
   if (err) console.warn('⚠️  playwright install aviso:', err.message);
   else console.log('🎭 Playwright Chromium pronto.');
 });
@@ -34,9 +38,6 @@ const jwt      = require('jsonwebtoken');
 const cron     = require('node-cron');
 const AlexaRemote = require('alexa-remote2');
 const { createClient } = require('@supabase/supabase-js');
-const { spawn, exec: execCP } = require('child_process');
-const path     = require('path');
-const fs       = require('fs');
 require('dotenv').config();
 
 const app  = express();
