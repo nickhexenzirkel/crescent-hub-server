@@ -2272,10 +2272,19 @@ function parseNetscapeToPw(filePath) {
 }
 
 // Baixa vídeo via Playwright: abre YouTube real, intercepta player API, baixa via CDN
+// Extrai URL de vídeo de um array de formatos (prefere combined ≤480p)
+function pickVideoFormat(formats) {
+  const withUrl = formats.filter(f => f.url && f.mimeType?.startsWith('video/'));
+  return withUrl.filter(f => f.height && f.height <= 480 && f.audioQuality).sort((a,b) => b.height-a.height)[0]
+    || withUrl.filter(f => f.height && f.height <= 480).sort((a,b) => b.height-a.height)[0]
+    || withUrl.sort((a,b) => (b.height||0)-(a.height||0))[0]
+    || null;
+}
+
 async function downloadVideoWithPlaywright(videoId) {
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
   });
 
   let chosenFormat = null;
@@ -2294,46 +2303,50 @@ async function downloadVideoWithPlaywright(videoId) {
     }
 
     const page = await context.newPage();
-    let intercepted = false;
 
-    // Intercepta a resposta da player API do YouTube para obter URLs dos formatos
-    await page.route('**/youtubei/v1/player*', async (route) => {
+    // Esconde navigator.webdriver para evitar detecção de automação
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+
+    // Método 1: intercepta a player API com regex (mais confiável que glob)
+    await page.route(/youtube\.com\/youtubei\/v1\/player/, async (route) => {
+      console.log(`🎭 Player API interceptada: ${route.request().url().split('?')[0]}`);
       try {
         const response = await route.fetch();
         const text = await response.text();
-        if (!intercepted) {
-          try {
-            const data = JSON.parse(text);
-            if (data?.streamingData) {
-              intercepted = true;
-              const all = [
-                ...(data.streamingData.formats || []),
-                ...(data.streamingData.adaptiveFormats || []),
-              ];
-              console.log(`🎭 Player API: ${all.length} formatos encontrados`);
-              const videoFmts = all.filter(f => f.url && f.mimeType?.startsWith('video/'));
-              // Prefere combined (tem áudio) mp4 ≤480p, depois video-only ≤480p, depois qualquer
-              chosenFormat =
-                videoFmts.filter(f => f.height && f.height <= 480 && f.audioQuality)
-                  .sort((a, b) => b.height - a.height)[0] ||
-                videoFmts.filter(f => f.height && f.height <= 480)
-                  .sort((a, b) => b.height - a.height)[0] ||
-                videoFmts.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-              if (chosenFormat) console.log(`🎭 Formato escolhido: itag=${chosenFormat.itag} ${chosenFormat.height}p`);
-              else console.warn('🎭 Sem URL direta; formatos com cipher:', all.filter(f => f.signatureCipher).length);
-            }
-          } catch {}
-        }
+        try {
+          const data = JSON.parse(text);
+          if (data?.streamingData && !chosenFormat) {
+            const all = [...(data.streamingData.formats||[]), ...(data.streamingData.adaptiveFormats||[])];
+            console.log(`🎭 ${all.length} formatos — ${all.filter(f=>f.url).length} com URL direta, ${all.filter(f=>f.signatureCipher).length} com cipher`);
+            chosenFormat = pickVideoFormat(all);
+            if (chosenFormat) console.log(`🎭 Formato: itag=${chosenFormat.itag} ${chosenFormat.height}p`);
+          }
+        } catch {}
         await route.fulfill({ body: text, status: response.status(), headers: response.headers() });
       } catch { await route.continue(); }
     });
 
     console.log(`🎭 Abrindo YouTube: ${videoId}`);
-    await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    if (!intercepted) await page.waitForTimeout(5000);
+    await page.goto(`https://www.youtube.com/watch?v=${videoId}`, { waitUntil: 'load', timeout: 40000 });
+
+    // Aguarda a player API ser chamada (pode acontecer depois de 'load')
+    if (!chosenFormat) await page.waitForTimeout(6000);
+
+    // Método 2: extrai do ytInitialPlayerResponse se a interceptação não funcionou
+    if (!chosenFormat) {
+      console.log('🎭 Tentando ytInitialPlayerResponse...');
+      try {
+        const data = await page.evaluate(() => window.ytInitialPlayerResponse || null);
+        if (data?.streamingData) {
+          const all = [...(data.streamingData.formats||[]), ...(data.streamingData.adaptiveFormats||[])];
+          console.log(`🎭 ytInitialPlayerResponse: ${all.length} formatos, ${all.filter(f=>f.url).length} com URL direta`);
+          chosenFormat = pickVideoFormat(all);
+          if (chosenFormat) console.log(`🎭 Formato via ytInitialPlayerResponse: itag=${chosenFormat.itag}`);
+        }
+      } catch(e) { console.warn('🎭 ytInitialPlayerResponse falhou:', e.message); }
+    }
   } finally {
     await browser.close().catch(() => {});
   }
