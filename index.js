@@ -2238,8 +2238,8 @@ app.post('/api/ytdl/download', (req, res) => {
   scheduleVideoCleanup(videoId, outPath);
 
   const proc = spawn(YTDLP_BIN, [
-    '-f', 'bestvideo[height<=360][vcodec^=avc][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[height<=360]',
-    '--no-audio', '--no-playlist', '--no-part',
+    '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo[height<=360]',
+    '--no-playlist', '--no-part',
     '-o', outPath,
     `https://www.youtube.com/watch?v=${videoId}`
   ]);
