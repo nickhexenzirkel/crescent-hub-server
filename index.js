@@ -2375,8 +2375,6 @@ app.post('/api/ytdl/download', (req, res) => {
   const { videoId } = req.body;
   if (!videoId || !YT_ID_RE.test(videoId))
     return res.status(400).json({ error: 'videoId inválido' });
-  if (!playwrightReady)
-    return res.status(503).json({ error: 'Playwright Chromium não está pronto ainda' });
 
   const existing = ytdlpJobs.get(videoId);
   if (existing && existing.status !== 'error') return res.json({ status: existing.status });
