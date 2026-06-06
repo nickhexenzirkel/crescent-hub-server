@@ -2232,10 +2232,11 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
 const YT_ID_RE   = /^[a-zA-Z0-9_-]{11}$/;
 const ytdlpJobs  = new Map(); // videoId → { status, path }
 
-function scheduleVideoCleanup(videoId, filePath) {
+function scheduleVideoCleanup(videoId) {
   setTimeout(() => {
+    const job = ytdlpJobs.get(videoId);
     ytdlpJobs.delete(videoId);
-    if (fs.existsSync(filePath)) fs.unlink(filePath, () => {});
+    if (job?.path && fs.existsSync(job.path)) fs.unlink(job.path, () => {});
   }, 25 * 60 * 1000); // 25 min
 }
 
@@ -2251,17 +2252,29 @@ app.post('/api/ytdl/download', (req, res) => {
   // Se já existe e NÃO é erro, retorna o status atual
   if (existing && existing.status !== 'error') return res.json({ status: existing.status });
   // Se havia erro, limpa o arquivo antigo e reinicia
-  if (existing && fs.existsSync(existing.path)) fs.unlink(existing.path, () => {});
+  if (existing?.path && fs.existsSync(existing.path)) fs.unlink(existing.path, () => {});
 
-  const outPath = `/tmp/uw_${videoId}.mp4`;
-  const job = { status: 'downloading', path: outPath };
+  // Usa %(ext)s para aceitar qualquer formato (mp4, webm, etc.)
+  const outTemplate = `/tmp/uw_${videoId}.%(ext)s`;
+  const job = { status: 'downloading', path: null };
   ytdlpJobs.set(videoId, job);
-  scheduleVideoCleanup(videoId, outPath);
+  scheduleVideoCleanup(videoId, null);
 
   const ytdlpArgs = [
-    '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo',
+    // Tenta vídeo-only MP4, depois webm, depois combined — aceita qualquer coisa como último recurso
+    '-f', [
+      'bestvideo[height<=480][ext=mp4]',
+      'bestvideo[height<=360][ext=mp4]',
+      'bestvideo[ext=mp4]',
+      'bestvideo[height<=480][ext=webm]',
+      'bestvideo[height<=480]',
+      'bestvideo',
+      'best[height<=480][ext=mp4]',
+      'best[ext=mp4]',
+      'best[height<=480]',
+      'best',
+    ].join('/'),
     '--no-playlist', '--no-part', '--no-warnings',
-    // ios e mweb são os clientes com menor exigência de PO token em IPs de cloud
     '--extractor-args', 'youtube:player_client=ios,mweb,web_embedded',
   ];
   if (ytCookiesOk) {
@@ -2270,22 +2283,28 @@ app.post('/api/ytdl/download', (req, res) => {
   } else {
     console.warn(`⚠️  sem cookies — download pode falhar para ${videoId}`);
   }
-  ytdlpArgs.push('-o', outPath, `https://www.youtube.com/watch?v=${videoId}`);
+  ytdlpArgs.push('-o', outTemplate, `https://www.youtube.com/watch?v=${videoId}`);
   const proc = spawn(YTDLP_BIN, ytdlpArgs);
   let stderrBuf = '';
   proc.stderr.on('data', (d) => { if (stderrBuf.length < 2000) stderrBuf += d.toString(); });
   proc.stdout.on('data', (d) => console.log(`yt-dlp [${videoId}]:`, d.toString().trim()));
   proc.on('close', (code) => {
-    if (code === 0 && fs.existsSync(outPath)) {
-      job.status = 'ready';
-      console.log(`✓ vídeo ${videoId} pronto`);
+    if (code === 0) {
+      // Descobre qual extensão o yt-dlp escolheu (mp4, webm, etc.)
+      const files = fs.readdirSync('/tmp').filter(f => f.startsWith(`uw_${videoId}.`));
+      if (files.length > 0) {
+        job.path = `/tmp/${files[0]}`;
+        job.ext  = files[0].split('.').pop();
+        job.status = 'ready';
+        console.log(`✓ vídeo ${videoId} pronto (${job.ext})`);
+      } else {
+        job.status = 'error'; job.errorMsg = 'arquivo não encontrado após download';
+      }
     } else {
       job.status = 'error';
-      // mostra primeiros 600 chars (onde fica a mensagem de erro real)
       const errSnippet = stderrBuf.replace(/\s+/g, ' ').trim().slice(0, 600);
       job.errorMsg = errSnippet;
       console.error(`✗ yt-dlp falhou [${videoId}]:`, errSnippet);
-      if (fs.existsSync(outPath)) fs.unlink(outPath, () => {});
     }
   });
   proc.on('error', (e) => { job.status = 'error'; job.errorMsg = e.message; });
@@ -2325,11 +2344,12 @@ app.get('/api/ytdl/serve/:videoId', (req, res) => {
   const { videoId } = req.params;
   if (!YT_ID_RE.test(videoId)) return res.status(400).end();
   const job = ytdlpJobs.get(videoId);
-  if (!job || job.status !== 'ready') return res.status(404).end();
-  const filePath = `/tmp/uw_${videoId}.mp4`;
+  if (!job || job.status !== 'ready' || !job.path) return res.status(404).end();
+  const filePath = job.path;
   if (!fs.existsSync(filePath)) return res.status(404).end();
 
-  const stat = fs.statSync(filePath);
+  const contentType = (job.ext === 'webm') ? 'video/webm' : 'video/mp4';
+  const stat  = fs.statSync(filePath);
   const total = stat.size;
   const range = req.headers.range;
 
@@ -2341,14 +2361,14 @@ app.get('/api/ytdl/serve/:videoId', (req, res) => {
       'Content-Range':  `bytes ${start}-${end}/${total}`,
       'Accept-Ranges':  'bytes',
       'Content-Length': end - start + 1,
-      'Content-Type':   'video/mp4',
+      'Content-Type':   contentType,
       'Access-Control-Allow-Origin': '*',
     });
     fs.createReadStream(filePath, { start, end }).pipe(res);
   } else {
     res.writeHead(200, {
       'Content-Length': total,
-      'Content-Type':   'video/mp4',
+      'Content-Type':   contentType,
       'Accept-Ranges':  'bytes',
       'Access-Control-Allow-Origin': '*',
     });
