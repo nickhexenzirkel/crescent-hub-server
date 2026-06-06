@@ -9,6 +9,23 @@ require('child_process').exec('npx playwright install chromium', (err) => {
   else console.log('🎭 Playwright Chromium pronto.');
 });
 
+// ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
+const YTDLP_BIN = '/tmp/yt-dlp';
+let ytdlpReady = false;
+(function ensureYtDlp() {
+  execCP(`${YTDLP_BIN} --version`, (err) => {
+    if (!err) { ytdlpReady = true; console.log('🎵 yt-dlp pronto.'); return; }
+    console.log('🎵 Baixando yt-dlp...');
+    execCP(
+      `curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o ${YTDLP_BIN} && chmod +x ${YTDLP_BIN}`,
+      (e) => {
+        if (e) console.error('❌ yt-dlp install falhou:', e.message);
+        else   { ytdlpReady = true; console.log('🎵 yt-dlp instalado.'); }
+      }
+    );
+  });
+})();
+
 const express  = require('express');
 const cors     = require('cors');
 const axios    = require('axios');
@@ -17,6 +34,9 @@ const jwt      = require('jsonwebtoken');
 const cron     = require('node-cron');
 const AlexaRemote = require('alexa-remote2');
 const { createClient } = require('@supabase/supabase-js');
+const { spawn, exec: execCP } = require('child_process');
+const path     = require('path');
+const fs       = require('fs');
 require('dotenv').config();
 
 const app  = express();
@@ -2185,6 +2205,94 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
   const job = fatJobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job não encontrado' });
   res.json({ status: job.status, logs: job.logs, total: job.total, message: job.message });
+});
+
+// ═══════════════════════════════════════════════════════
+// YT-DLP — Download de vídeo para o Uniko Wave
+// ═══════════════════════════════════════════════════════
+const YT_ID_RE   = /^[a-zA-Z0-9_-]{11}$/;
+const ytdlpJobs  = new Map(); // videoId → { status, path }
+
+function scheduleVideoCleanup(videoId, filePath) {
+  setTimeout(() => {
+    ytdlpJobs.delete(videoId);
+    if (fs.existsSync(filePath)) fs.unlink(filePath, () => {});
+  }, 25 * 60 * 1000); // 25 min
+}
+
+// Inicia o download
+app.post('/api/ytdl/download', (req, res) => {
+  const { videoId } = req.body;
+  if (!videoId || !YT_ID_RE.test(videoId))
+    return res.status(400).json({ error: 'videoId inválido' });
+  if (!ytdlpReady)
+    return res.status(503).json({ error: 'yt-dlp não está pronto ainda' });
+
+  const existing = ytdlpJobs.get(videoId);
+  if (existing) return res.json({ status: existing.status });
+
+  const outPath = `/tmp/uw_${videoId}.mp4`;
+  const job = { status: 'downloading', path: outPath };
+  ytdlpJobs.set(videoId, job);
+  scheduleVideoCleanup(videoId, outPath);
+
+  const proc = spawn(YTDLP_BIN, [
+    '-f', 'bestvideo[height<=360][vcodec^=avc][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[height<=360]',
+    '--no-audio', '--no-playlist', '--no-part',
+    '-o', outPath,
+    `https://www.youtube.com/watch?v=${videoId}`
+  ]);
+  proc.on('close', (code) => {
+    job.status = (code === 0 && fs.existsSync(outPath)) ? 'ready' : 'error';
+    if (job.status === 'error' && fs.existsSync(outPath)) fs.unlink(outPath, () => {});
+  });
+  proc.on('error', () => { job.status = 'error'; });
+
+  res.json({ status: 'downloading' });
+});
+
+// Consulta status do download
+app.get('/api/ytdl/status/:videoId', (req, res) => {
+  const { videoId } = req.params;
+  if (!YT_ID_RE.test(videoId)) return res.status(400).json({ error: 'ID inválido' });
+  const job = ytdlpJobs.get(videoId);
+  res.json({ status: job ? job.status : 'not_found' });
+});
+
+// Serve o arquivo de vídeo (com suporte a byte-range para o browser)
+app.get('/api/ytdl/serve/:videoId', (req, res) => {
+  const { videoId } = req.params;
+  if (!YT_ID_RE.test(videoId)) return res.status(400).end();
+  const job = ytdlpJobs.get(videoId);
+  if (!job || job.status !== 'ready') return res.status(404).end();
+  const filePath = `/tmp/uw_${videoId}.mp4`;
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+
+  const stat = fs.statSync(filePath);
+  const total = stat.size;
+  const range = req.headers.range;
+
+  if (range) {
+    const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(startStr, 10);
+    const end   = endStr ? parseInt(endStr, 10) : total - 1;
+    res.writeHead(206, {
+      'Content-Range':  `bytes ${start}-${end}/${total}`,
+      'Accept-Ranges':  'bytes',
+      'Content-Length': end - start + 1,
+      'Content-Type':   'video/mp4',
+      'Access-Control-Allow-Origin': '*',
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': total,
+      'Content-Type':   'video/mp4',
+      'Accept-Ranges':  'bytes',
+      'Access-Control-Allow-Origin': '*',
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
 });
 
 // ═══════════════════════════════════════════════════════
