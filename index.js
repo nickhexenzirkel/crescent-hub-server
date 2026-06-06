@@ -11,13 +11,15 @@ const fs       = require('fs');
 execCP('npx playwright install chromium', (err) => {
   if (err) console.warn('⚠️  playwright install aviso:', err.message);
   else console.log('🎭 Playwright Chromium pronto.');
+  playwrightReady = true; // pronto mesmo com aviso (chromium pode já estar instalado)
 });
 
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
 const YTDLP_BIN     = '/tmp/yt-dlp';
 const YTCOOKIES_FILE = '/tmp/yt-cookies.txt';
-let ytdlpReady   = false;
-let ytCookiesOk  = false;
+let ytdlpReady    = false;
+let playwrightReady = false;
+let ytCookiesOk   = false;
 
 // Escreve cookies do env var em arquivo (necessário para IPs de cloud)
 if (process.env.YOUTUBE_COOKIES) {
@@ -2227,17 +2229,145 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-// YT-DLP — Download de vídeo para o Uniko Wave
+// PLAYWRIGHT — Download de vídeo para o Uniko Wave
+// yt-dlp falha em cloud IPs (PO token obrigatório desde 2024)
+// Playwright usa Chrome real → TLS fingerprint autentico → formatos disponíveis
 // ═══════════════════════════════════════════════════════
-const YT_ID_RE   = /^[a-zA-Z0-9_-]{11}$/;
-const ytdlpJobs  = new Map(); // videoId → { status, path }
+const YT_ID_RE  = /^[a-zA-Z0-9_-]{11}$/;
+const ytdlpJobs = new Map(); // videoId → { status, path, ext }
 
 function scheduleVideoCleanup(videoId) {
   setTimeout(() => {
     const job = ytdlpJobs.get(videoId);
     ytdlpJobs.delete(videoId);
     if (job?.path && fs.existsSync(job.path)) fs.unlink(job.path, () => {});
-  }, 25 * 60 * 1000); // 25 min
+  }, 25 * 60 * 1000);
+}
+
+// Converte Netscape cookie file → array Playwright
+function parseNetscapeToPw(filePath) {
+  const cookies = [];
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+    for (const line of lines) {
+      if (!line || line.startsWith('#')) continue;
+      const parts = line.split('\t');
+      if (parts.length < 7) continue;
+      const [rawDomain, , path, secure, expiresStr, name, ...valParts] = parts;
+      const value = valParts.join('\t');
+      if (!name.trim()) continue;
+      cookies.push({
+        name: name.trim(),
+        value: value.trim(),
+        domain: rawDomain.startsWith('.') ? rawDomain.slice(1) : rawDomain,
+        path: path || '/',
+        secure: secure === 'TRUE',
+        expires: parseInt(expiresStr) || -1,
+        httpOnly: false,
+        sameSite: 'Lax',
+      });
+    }
+  } catch {}
+  return cookies;
+}
+
+// Baixa vídeo via Playwright: abre YouTube real, intercepta player API, baixa via CDN
+async function downloadVideoWithPlaywright(videoId) {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  });
+
+  let chosenFormat = null;
+
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    });
+
+    if (ytCookiesOk) {
+      const pwCookies = parseNetscapeToPw(YTCOOKIES_FILE);
+      if (pwCookies.length) {
+        await context.addCookies(pwCookies);
+        console.log(`🎭 ${pwCookies.length} cookies YT carregados no browser`);
+      }
+    }
+
+    const page = await context.newPage();
+    let intercepted = false;
+
+    // Intercepta a resposta da player API do YouTube para obter URLs dos formatos
+    await page.route('**/youtubei/v1/player*', async (route) => {
+      try {
+        const response = await route.fetch();
+        const text = await response.text();
+        if (!intercepted) {
+          try {
+            const data = JSON.parse(text);
+            if (data?.streamingData) {
+              intercepted = true;
+              const all = [
+                ...(data.streamingData.formats || []),
+                ...(data.streamingData.adaptiveFormats || []),
+              ];
+              console.log(`🎭 Player API: ${all.length} formatos encontrados`);
+              const videoFmts = all.filter(f => f.url && f.mimeType?.startsWith('video/'));
+              // Prefere combined (tem áudio) mp4 ≤480p, depois video-only ≤480p, depois qualquer
+              chosenFormat =
+                videoFmts.filter(f => f.height && f.height <= 480 && f.audioQuality)
+                  .sort((a, b) => b.height - a.height)[0] ||
+                videoFmts.filter(f => f.height && f.height <= 480)
+                  .sort((a, b) => b.height - a.height)[0] ||
+                videoFmts.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+              if (chosenFormat) console.log(`🎭 Formato escolhido: itag=${chosenFormat.itag} ${chosenFormat.height}p`);
+              else console.warn('🎭 Sem URL direta; formatos com cipher:', all.filter(f => f.signatureCipher).length);
+            }
+          } catch {}
+        }
+        await route.fulfill({ body: text, status: response.status(), headers: response.headers() });
+      } catch { await route.continue(); }
+    });
+
+    console.log(`🎭 Abrindo YouTube: ${videoId}`);
+    await page.goto(`https://www.youtube.com/watch?v=${videoId}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    if (!intercepted) await page.waitForTimeout(5000);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+
+  if (!chosenFormat?.url) throw new Error('Nenhum formato de vídeo com URL direta disponível');
+
+  const ext = chosenFormat.mimeType?.includes('webm') ? 'webm' : 'mp4';
+  const outPath = `/tmp/uw_${videoId}.${ext}`;
+
+  console.log(`🎭 Baixando ${videoId} (${chosenFormat.height}p ${ext})...`);
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(outPath);
+    const https = require('https');
+    const doGet = (url, redirectsLeft) => {
+      https.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Referer': 'https://www.youtube.com/',
+        },
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
+          doGet(res.headers.location, redirectsLeft - 1);
+          return;
+        }
+        if (res.statusCode >= 400) { file.close(() => {}); reject(new Error(`CDN HTTP ${res.statusCode}`)); return; }
+        res.pipe(file);
+        file.on('finish', () => file.close(resolve));
+      }).on('error', (e) => { file.close(() => {}); reject(e); });
+    };
+    doGet(chosenFormat.url, 5);
+  });
+
+  console.log(`✓ vídeo ${videoId} baixado (${fs.statSync(outPath).size} bytes)`);
+  return { path: outPath, ext };
 }
 
 // Inicia o download (re-dispara se job anterior falhou)
@@ -2245,59 +2375,27 @@ app.post('/api/ytdl/download', (req, res) => {
   const { videoId } = req.body;
   if (!videoId || !YT_ID_RE.test(videoId))
     return res.status(400).json({ error: 'videoId inválido' });
-  if (!ytdlpReady)
-    return res.status(503).json({ error: 'yt-dlp não está pronto ainda' });
+  if (!playwrightReady)
+    return res.status(503).json({ error: 'Playwright Chromium não está pronto ainda' });
 
   const existing = ytdlpJobs.get(videoId);
-  // Se já existe e NÃO é erro, retorna o status atual
   if (existing && existing.status !== 'error') return res.json({ status: existing.status });
-  // Se havia erro, limpa o arquivo antigo e reinicia
   if (existing?.path && fs.existsSync(existing.path)) fs.unlink(existing.path, () => {});
 
-  // Usa %(ext)s para aceitar qualquer formato (mp4, webm, etc.)
-  const outTemplate = `/tmp/uw_${videoId}.%(ext)s`;
   const job = { status: 'downloading', path: null };
   ytdlpJobs.set(videoId, job);
-  scheduleVideoCleanup(videoId, null);
+  scheduleVideoCleanup(videoId);
 
-  const ytdlpArgs = [
-    // tv_embedded não exige PO token (web/android exigem desde 2024)
-    // Retorna combined streams 18 (360p mp4) e 22 (720p mp4) sem precisar de ffmpeg
-    '-f', '18/22/bestvideo[height<=480][ext=mp4]/bestvideo[height<=480]/bestvideo',
-    '--no-playlist', '--no-part', '--no-warnings',
-    '--extractor-args', 'youtube:player_client=tv_embedded',
-  ];
-  if (ytCookiesOk) {
-    ytdlpArgs.push('--cookies', YTCOOKIES_FILE);
-    console.log(`🍪 usando cookies para ${videoId}`);
-  } else {
-    console.warn(`⚠️  sem cookies — download pode falhar para ${videoId}`);
-  }
-  ytdlpArgs.push('-o', outTemplate, `https://www.youtube.com/watch?v=${videoId}`);
-  const proc = spawn(YTDLP_BIN, ytdlpArgs);
-  let stderrBuf = '';
-  proc.stderr.on('data', (d) => { if (stderrBuf.length < 2000) stderrBuf += d.toString(); });
-  proc.stdout.on('data', (d) => console.log(`yt-dlp [${videoId}]:`, d.toString().trim()));
-  proc.on('close', (code) => {
-    if (code === 0) {
-      // Descobre qual extensão o yt-dlp escolheu (mp4, webm, etc.)
-      const files = fs.readdirSync('/tmp').filter(f => f.startsWith(`uw_${videoId}.`));
-      if (files.length > 0) {
-        job.path = `/tmp/${files[0]}`;
-        job.ext  = files[0].split('.').pop();
-        job.status = 'ready';
-        console.log(`✓ vídeo ${videoId} pronto (${job.ext})`);
-      } else {
-        job.status = 'error'; job.errorMsg = 'arquivo não encontrado após download';
-      }
-    } else {
-      job.status = 'error';
-      const errSnippet = stderrBuf.replace(/\s+/g, ' ').trim().slice(0, 600);
-      job.errorMsg = errSnippet;
-      console.error(`✗ yt-dlp falhou [${videoId}]:`, errSnippet);
-    }
-  });
-  proc.on('error', (e) => { job.status = 'error'; job.errorMsg = e.message; });
+  console.log(`🎭 Download iniciado: ${videoId}`);
+  downloadVideoWithPlaywright(videoId)
+    .then(({ path: p, ext }) => {
+      job.path = p; job.ext = ext; job.status = 'ready';
+      console.log(`✓ ${videoId} pronto via Playwright (${ext})`);
+    })
+    .catch((err) => {
+      job.status = 'error'; job.errorMsg = err.message;
+      console.error(`✗ Playwright falhou [${videoId}]:`, err.message);
+    });
 
   res.json({ status: 'downloading' });
 });
