@@ -2221,7 +2221,7 @@ function scheduleVideoCleanup(videoId, filePath) {
   }, 25 * 60 * 1000); // 25 min
 }
 
-// Inicia o download
+// Inicia o download (re-dispara se job anterior falhou)
 app.post('/api/ytdl/download', (req, res) => {
   const { videoId } = req.body;
   if (!videoId || !YT_ID_RE.test(videoId))
@@ -2230,7 +2230,10 @@ app.post('/api/ytdl/download', (req, res) => {
     return res.status(503).json({ error: 'yt-dlp não está pronto ainda' });
 
   const existing = ytdlpJobs.get(videoId);
-  if (existing) return res.json({ status: existing.status });
+  // Se já existe e NÃO é erro, retorna o status atual
+  if (existing && existing.status !== 'error') return res.json({ status: existing.status });
+  // Se havia erro, limpa o arquivo antigo e reinicia
+  if (existing && fs.existsSync(existing.path)) fs.unlink(existing.path, () => {});
 
   const outPath = `/tmp/uw_${videoId}.mp4`;
   const job = { status: 'downloading', path: outPath };
@@ -2238,16 +2241,28 @@ app.post('/api/ytdl/download', (req, res) => {
   scheduleVideoCleanup(videoId, outPath);
 
   const proc = spawn(YTDLP_BIN, [
-    '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo[height<=360]',
-    '--no-playlist', '--no-part',
+    '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo',
+    '--no-playlist', '--no-part', '--no-warnings',
+    '--extractor-args', 'youtube:player_client=android,web',
+    '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
     '-o', outPath,
     `https://www.youtube.com/watch?v=${videoId}`
   ]);
+  let stderrBuf = '';
+  proc.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+  proc.stdout.on('data', (d) => console.log(`yt-dlp [${videoId}]:`, d.toString().trim()));
   proc.on('close', (code) => {
-    job.status = (code === 0 && fs.existsSync(outPath)) ? 'ready' : 'error';
-    if (job.status === 'error' && fs.existsSync(outPath)) fs.unlink(outPath, () => {});
+    if (code === 0 && fs.existsSync(outPath)) {
+      job.status = 'ready';
+      console.log(`✓ vídeo ${videoId} pronto`);
+    } else {
+      job.status = 'error';
+      job.errorMsg = stderrBuf.slice(-400);
+      console.error(`✗ yt-dlp falhou [${videoId}]:`, stderrBuf.slice(-400));
+      if (fs.existsSync(outPath)) fs.unlink(outPath, () => {});
+    }
   });
-  proc.on('error', () => { job.status = 'error'; });
+  proc.on('error', (e) => { job.status = 'error'; job.errorMsg = e.message; });
 
   res.json({ status: 'downloading' });
 });
@@ -2257,7 +2272,9 @@ app.get('/api/ytdl/status/:videoId', (req, res) => {
   const { videoId } = req.params;
   if (!YT_ID_RE.test(videoId)) return res.status(400).json({ error: 'ID inválido' });
   const job = ytdlpJobs.get(videoId);
-  res.json({ status: job ? job.status : 'not_found' });
+  const resp = { status: job ? job.status : 'not_found' };
+  if (job && job.errorMsg) resp.errorMsg = job.errorMsg.slice(-200);
+  res.json(resp);
 });
 
 // Serve o arquivo de vídeo (com suporte a byte-range para o browser)
