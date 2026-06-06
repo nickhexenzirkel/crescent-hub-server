@@ -31,17 +31,21 @@ if (process.env.YOUTUBE_COOKIES) {
 }
 
 (function ensureYtDlp() {
-  execCP(`${YTDLP_BIN} --version`, (err) => {
-    if (!err) { ytdlpReady = true; console.log('🎵 yt-dlp pronto.'); return; }
-    console.log('🎵 Baixando yt-dlp...');
-    execCP(
-      `curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o ${YTDLP_BIN} && chmod +x ${YTDLP_BIN}`,
-      (e) => {
-        if (e) console.error('❌ yt-dlp install falhou:', e.message);
-        else   { ytdlpReady = true; console.log('🎵 yt-dlp instalado.'); }
+  // Sempre atualiza para garantir versão mais recente (bypass do bot-check muda com frequência)
+  console.log('🎵 Atualizando yt-dlp...');
+  execCP(
+    `curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o ${YTDLP_BIN} && chmod +x ${YTDLP_BIN}`,
+    (e) => {
+      if (e) {
+        console.error('❌ yt-dlp update falhou:', e.message);
+        // tenta usar versão já instalada
+        execCP(`${YTDLP_BIN} --version`, (e2) => { if (!e2) ytdlpReady = true; });
+      } else {
+        ytdlpReady = true;
+        console.log('🎵 yt-dlp atualizado.');
       }
-    );
-  });
+    }
+  );
 })();
 
 const express  = require('express');
@@ -2257,8 +2261,8 @@ app.post('/api/ytdl/download', (req, res) => {
   const ytdlpArgs = [
     '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=360][ext=mp4]/bestvideo[ext=mp4]/bestvideo[height<=480]/bestvideo',
     '--no-playlist', '--no-part', '--no-warnings',
-    '--extractor-args', 'youtube:player_client=android,web',
-    '--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
+    // ios e mweb são os clientes com menor exigência de PO token em IPs de cloud
+    '--extractor-args', 'youtube:player_client=ios,mweb,web_embedded',
   ];
   if (ytCookiesOk) {
     ytdlpArgs.push('--cookies', YTCOOKIES_FILE);
@@ -2269,7 +2273,7 @@ app.post('/api/ytdl/download', (req, res) => {
   ytdlpArgs.push('-o', outPath, `https://www.youtube.com/watch?v=${videoId}`);
   const proc = spawn(YTDLP_BIN, ytdlpArgs);
   let stderrBuf = '';
-  proc.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+  proc.stderr.on('data', (d) => { if (stderrBuf.length < 2000) stderrBuf += d.toString(); });
   proc.stdout.on('data', (d) => console.log(`yt-dlp [${videoId}]:`, d.toString().trim()));
   proc.on('close', (code) => {
     if (code === 0 && fs.existsSync(outPath)) {
@@ -2277,8 +2281,10 @@ app.post('/api/ytdl/download', (req, res) => {
       console.log(`✓ vídeo ${videoId} pronto`);
     } else {
       job.status = 'error';
-      job.errorMsg = stderrBuf.slice(-400);
-      console.error(`✗ yt-dlp falhou [${videoId}]:`, stderrBuf.slice(-400));
+      // mostra primeiros 600 chars (onde fica a mensagem de erro real)
+      const errSnippet = stderrBuf.replace(/\s+/g, ' ').trim().slice(0, 600);
+      job.errorMsg = errSnippet;
+      console.error(`✗ yt-dlp falhou [${videoId}]:`, errSnippet);
       if (fs.existsSync(outPath)) fs.unlink(outPath, () => {});
     }
   });
