@@ -2261,21 +2261,10 @@ app.post('/api/ytdl/download', (req, res) => {
   scheduleVideoCleanup(videoId, null);
 
   const ytdlpArgs = [
-    // Tenta vídeo-only MP4, depois webm, depois combined — aceita qualquer coisa como último recurso
-    '-f', [
-      'bestvideo[height<=480][ext=mp4]',
-      'bestvideo[height<=360][ext=mp4]',
-      'bestvideo[ext=mp4]',
-      'bestvideo[height<=480][ext=webm]',
-      'bestvideo[height<=480]',
-      'bestvideo',
-      'best[height<=480][ext=mp4]',
-      'best[ext=mp4]',
-      'best[height<=480]',
-      'best',
-    ].join('/'),
+    // 'best' = melhor stream combined disponível — funciona com android que suporta DASH
+    '-f', 'best[height<=480]/best',
     '--no-playlist', '--no-part', '--no-warnings',
-    '--extractor-args', 'youtube:player_client=ios,mweb,web_embedded',
+    '--extractor-args', 'youtube:player_client=android,web',
   ];
   if (ytCookiesOk) {
     ytdlpArgs.push('--cookies', YTCOOKIES_FILE);
