@@ -2297,6 +2297,23 @@ app.get('/api/ytdl/status/:videoId', (req, res) => {
   res.json(resp);
 });
 
+// Recebe cookies do YouTube enviados pelo Catbot (extensão Chrome)
+app.post('/api/ytdl/set-cookies', (req, res) => {
+  const auth = req.headers['authorization'];
+  if (auth !== 'Bearer uniko-ytcookies') return res.status(401).json({ error: 'não autorizado' });
+  const { cookies } = req.body;
+  if (!cookies || typeof cookies !== 'string' || cookies.length < 20)
+    return res.status(400).json({ error: 'cookies inválido' });
+  try {
+    fs.writeFileSync(YTCOOKIES_FILE, cookies, 'utf8');
+    ytCookiesOk = true;
+    console.log(`🍪 Cookies do YouTube atualizados via Catbot (${cookies.split('\n').length} linhas).`);
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Serve o arquivo de vídeo (com suporte a byte-range para o browser)
 app.get('/api/ytdl/serve/:videoId', (req, res) => {
   const { videoId } = req.params;
