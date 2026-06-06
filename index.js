@@ -2261,11 +2261,11 @@ app.post('/api/ytdl/download', (req, res) => {
   scheduleVideoCleanup(videoId, null);
 
   const ytdlpArgs = [
-    // bestvideo = stream DASH vídeo-only; <video> está muted, áudio vem do iframe
-    // Não precisa de ffmpeg (stream único). combined 18/22 como fallback clássico
-    '-f', 'bestvideo[height<=480][ext=mp4]/bestvideo[height<=480][ext=webm]/bestvideo[height<=480]/bestvideo/18/22',
+    // tv_embedded não exige PO token (web/android exigem desde 2024)
+    // Retorna combined streams 18 (360p mp4) e 22 (720p mp4) sem precisar de ffmpeg
+    '-f', '18/22/bestvideo[height<=480][ext=mp4]/bestvideo[height<=480]/bestvideo',
     '--no-playlist', '--no-part', '--no-warnings',
-    '--extractor-args', 'youtube:player_client=web,android',
+    '--extractor-args', 'youtube:player_client=tv_embedded',
   ];
   if (ytCookiesOk) {
     ytdlpArgs.push('--cookies', YTCOOKIES_FILE);
