@@ -22,7 +22,10 @@ const playwrightReadyPromise = new Promise((resolve) => {
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
 const YTDLP_BIN     = '/tmp/yt-dlp';
 const YTCOOKIES_FILE = '/tmp/yt-cookies.txt';
+const FFMPEG_DIR    = '/tmp/ffmpeg-bin';   // ffmpeg estático extraído aqui
+let FFMPEG_LOCATION = '';                    // dir passado ao yt-dlp (--ffmpeg-location)
 let ytdlpReady    = false;
+let ffmpegReady   = false;
 let playwrightReady = false;
 let ytCookiesOk   = false;
 
@@ -53,6 +56,25 @@ if (process.env.YOUTUBE_COOKIES) {
       }
     }
   );
+})();
+
+(function ensureFfmpeg() {
+  // ffmpeg é necessário para unir vídeo+áudio (YouTube só serve streams separados).
+  // Usa o do sistema se existir; senão baixa um build estático.
+  execCP('ffmpeg -version', (e) => {
+    if (!e) { ffmpegReady = true; console.log('🎬 ffmpeg do sistema disponível.'); return; }
+    console.log('🎬 Baixando ffmpeg estático...');
+    const url = 'https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz';
+    const cmd = `mkdir -p ${FFMPEG_DIR} && curl -fsSL "${url}" -o /tmp/ffmpeg.tar.xz `
+      + `&& tar -xJf /tmp/ffmpeg.tar.xz -C ${FFMPEG_DIR} --strip-components=1 `
+      + `&& chmod +x ${FFMPEG_DIR}/bin/ffmpeg ${FFMPEG_DIR}/bin/ffprobe`;
+    execCP(cmd, (e2) => {
+      if (e2) { console.error('❌ ffmpeg download falhou:', e2.message); return; }
+      FFMPEG_LOCATION = `${FFMPEG_DIR}/bin`;
+      ffmpegReady = true;
+      console.log('🎬 ffmpeg estático pronto.');
+    });
+  });
 })();
 
 const express  = require('express');
@@ -2412,14 +2434,22 @@ async function downloadVideoWithYtDlp(videoId) {
     await waitFor(() => ytdlpReady, 60000);
   }
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
+  if (!ffmpegReady) {
+    console.log(`⏳ Aguardando ffmpeg ficar pronto [${videoId}]...`);
+    await waitFor(() => ffmpegReady, 60000);
+  }
 
   const args = [
     '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
-    // Apenas formatos progressivos (áudio+vídeo no mesmo arquivo) → dispensa ffmpeg
-    '-f', 'best[height<=480][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best',
-    '--extractor-args', 'youtube:player_client=web',
+    // Prefere progressivo mp4; senão une o melhor vídeo+áudio (≤480p) via ffmpeg
+    '-f', 'best[height<=480][ext=mp4][acodec!=none][vcodec!=none]'
+        + '/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]'
+        + '/best[height<=480][acodec!=none][vcodec!=none]'
+        + '/bestvideo[height<=480]+bestaudio/best',
+    '--merge-output-format', 'mp4',
     '-o', `/tmp/uw_${videoId}.%(ext)s`,
   ];
+  if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
   if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
   args.push(`https://www.youtube.com/watch?v=${videoId}`);
 
