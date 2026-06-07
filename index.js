@@ -2394,6 +2394,57 @@ async function downloadVideoWithPlaywright(videoId) {
   return { path: outPath, ext };
 }
 
+// Espera uma flag virar true (com timeout) — usado no cold start do Render
+async function waitFor(flagFn, timeoutMs) {
+  const start = Date.now();
+  while (!flagFn() && Date.now() - start < timeoutMs) {
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return flagFn();
+}
+
+// Método principal: yt-dlp com os cookies reais do Catbot.
+// yt-dlp decifra a assinatura e o parâmetro `n` nativamente; os cookies de
+// usuário logado permitem passar pela verificação de bot em IPs de nuvem.
+async function downloadVideoWithYtDlp(videoId) {
+  if (!ytdlpReady) {
+    console.log(`⏳ Aguardando yt-dlp ficar pronto [${videoId}]...`);
+    await waitFor(() => ytdlpReady, 60000);
+  }
+  if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
+
+  const args = [
+    '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
+    // Apenas formatos progressivos (áudio+vídeo no mesmo arquivo) → dispensa ffmpeg
+    '-f', 'best[height<=480][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]/best',
+    '--extractor-args', 'youtube:player_client=web',
+    '-o', `/tmp/uw_${videoId}.%(ext)s`,
+  ];
+  if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
+  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+
+  console.log(`🎵 yt-dlp baixando ${videoId}...`);
+  await new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP_BIN, args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`yt-dlp código ${code}: ${stderr.trim().slice(-300)}`));
+    });
+  });
+
+  const found = fs.readdirSync('/tmp')
+    .find(f => f.startsWith(`uw_${videoId}.`) && !f.endsWith('.part'));
+  if (!found) throw new Error('yt-dlp terminou mas o arquivo não foi encontrado');
+
+  const outPath = `/tmp/${found}`;
+  const ext = found.endsWith('.webm') ? 'webm' : 'mp4';
+  console.log(`✓ vídeo ${videoId} baixado via yt-dlp (${fs.statSync(outPath).size} bytes, ${ext})`);
+  return { path: outPath, ext };
+}
+
 // Inicia o download (re-dispara se job anterior falhou)
 app.post('/api/ytdl/download', (req, res) => {
   const { videoId } = req.body;
@@ -2408,15 +2459,19 @@ app.post('/api/ytdl/download', (req, res) => {
   ytdlpJobs.set(videoId, job);
   scheduleVideoCleanup(videoId);
 
-  console.log(`🎭 Download iniciado: ${videoId}`);
-  downloadVideoWithPlaywright(videoId)
+  console.log(`🎵 Download iniciado: ${videoId}`);
+  downloadVideoWithYtDlp(videoId)
+    .catch((err) => {
+      console.warn(`⚠️  yt-dlp falhou [${videoId}]: ${err.message} — tentando Playwright...`);
+      return downloadVideoWithPlaywright(videoId);
+    })
     .then(({ path: p, ext }) => {
       job.path = p; job.ext = ext; job.status = 'ready';
-      console.log(`✓ ${videoId} pronto via Playwright (${ext})`);
+      console.log(`✓ ${videoId} pronto (${ext})`);
     })
     .catch((err) => {
       job.status = 'error'; job.errorMsg = err.message;
-      console.error(`✗ Playwright falhou [${videoId}]:`, err.message);
+      console.error(`✗ Download falhou [${videoId}]:`, err.message);
     });
 
   res.json({ status: 'downloading' });
