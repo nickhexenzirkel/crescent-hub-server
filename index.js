@@ -7,11 +7,16 @@ const { spawn, exec: execCP } = require('child_process');
 const path     = require('path');
 const fs       = require('fs');
 
-// Instala Chromium em segundo plano para não bloquear a inicialização do servidor
-execCP('npx playwright install chromium', (err) => {
-  if (err) console.warn('⚠️  playwright install aviso:', err.message);
-  else console.log('🎭 Playwright Chromium pronto.');
-  playwrightReady = true; // pronto mesmo com aviso (chromium pode já estar instalado)
+// O Chromium é instalado no build (postinstall do package.json). Aqui apenas
+// verificamos/reinstalamos como fallback e expomos uma promise para que os
+// downloads aguardem o navegador estar pronto, evitando a corrida no cold start.
+const playwrightReadyPromise = new Promise((resolve) => {
+  execCP('npx playwright install chromium', (err) => {
+    if (err) console.warn('⚠️  playwright install aviso:', err.message);
+    else console.log('🎭 Playwright Chromium pronto.');
+    playwrightReady = true; // o navegador já existe do build; a flag libera os jobs
+    resolve();
+  });
 });
 
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
@@ -2282,6 +2287,12 @@ function pickVideoFormat(formats) {
 }
 
 async function downloadVideoWithPlaywright(videoId) {
+  // Garante que o Chromium terminou de instalar antes de lançar (cold start do Render)
+  if (!playwrightReady) {
+    console.log(`⏳ Aguardando Chromium do Playwright ficar pronto [${videoId}]...`);
+    await playwrightReadyPromise;
+  }
+
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
