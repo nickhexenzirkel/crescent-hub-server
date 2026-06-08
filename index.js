@@ -2681,27 +2681,28 @@ async function downloadAudioWithYtDlp(videoId) {
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
 
   const usePot = !!(POT_PROVIDER_URL && potPluginReady);
-  // Com PO token: 'tv' PRIMEIRO — é o único que dá URL direta + aceita POT.
-  // web/web_safari são forçados a SABR (sem URL) → "format not available" mesmo com POT.
-  const clients = usePot ? 'tv,mweb,web_safari,web' : 'tv,android_vr,tv_embedded,ios';
+  // 'tv' é o único cliente que dá URL direta (web/web_safari = SABR sem URL) e
+  // aceita POT. Um único cliente = 1 requisição → evita o rate-limit 429.
+  const clients = usePot ? 'tv' : 'tv,android_vr,tv_embedded,ios';
   const url = `https://www.youtube.com/watch?v=${videoId}`;
 
   // Args comuns de extração (sem seletor de formato/output) — reusados no diagnóstico
   const extractArgs = ['--no-playlist', '--force-overwrites',
-    '--extractor-args', `youtube:player_client=${clients}`];
+    '--extractor-args', `youtube:player_client=${clients}`,
+    '--extractor-retries', '3', '--retry-sleep', 'extractor:3'];
   if (usePot) {
     extractArgs.push('--plugin-dirs', POT_PLUGIN_DIR);
     extractArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
   }
   if (FFMPEG_LOCATION) extractArgs.push('--ffmpeg-location', FFMPEG_LOCATION);
-  // Com POT usamos acesso ANÔNIMO: o POT é anônimo e cookies de conta logada
-  // conflitam, causando "format not available". Sem POT, os cookies ajudam.
-  if (ytCookiesOk && !usePot) extractArgs.push('--cookies', YTCOOKIES_FILE);
+  // Cookies SÃO necessários para passar o "confirm you're not a bot" na nuvem.
+  // Com cookies, o POT é vinculado à conta (datasync) — combinação correta.
+  if (ytCookiesOk) extractArgs.push('--cookies', YTCOOKIES_FILE);
 
   const args = [...extractArgs, '--no-warnings', '--no-progress',
     '-f', 'bestaudio/best', '-o', `/tmp/uw_a_${videoId}.%(ext)s`, url];
 
-  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (POT=${usePot}, cookies=${ytCookiesOk && !usePot})...`);
+  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (POT=${usePot}, cookies=${ytCookiesOk})...`);
   const r = await runProc(YTDLP_BIN, args);
 
   if (r.code !== 0) {
