@@ -2572,6 +2572,236 @@ app.get('/api/ytdl/serve/:videoId', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// UNIKO WAVE — Análise de RITMO REAL do áudio
+// Pega o áudio (cobalt → yt-dlp → playwright), decodifica com ffmpeg,
+// detecta as batidas/onsets reais e cacheia o mapa no Supabase.
+// ═══════════════════════════════════════════════════════
+
+// Baixa uma URL para um arquivo local (segue redirects)
+function downloadUrlToFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    const http  = require('http');
+    const file  = fs.createWriteStream(dest);
+    const doGet = (u, left) => {
+      const lib = u.startsWith('http:') ? http : https;
+      lib.get(u, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && left > 0) {
+          res.resume(); doGet(res.headers.location, left - 1); return;
+        }
+        if (res.statusCode >= 400) { file.close(() => {}); reject(new Error('download HTTP ' + res.statusCode)); return; }
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve(dest)));
+      }).on('error', (e) => { file.close(() => {}); reject(e); });
+    };
+    doGet(url, 5);
+  });
+}
+
+// Pede o áudio a uma instância do cobalt (serviço externo não-bloqueado pelo YouTube).
+// Configurável via COBALT_API (URL da instância) e COBALT_KEY (Api-Key, se exigida).
+async function fetchFromCobalt(videoId) {
+  const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const instances = [];
+  if (process.env.COBALT_API) instances.push(process.env.COBALT_API);
+  instances.push('https://api.cobalt.tools');
+  const key = process.env.COBALT_KEY;
+
+  for (const inst of instances) {
+    const base = inst.replace(/\/+$/, '');
+    // Schema atual (v10): POST na raiz
+    try {
+      const r = await axios.post(base, { url: ytUrl, downloadMode: 'audio', audioFormat: 'mp3', filenameStyle: 'basic' }, {
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', ...(key ? { Authorization: `Api-Key ${key}` } : {}) },
+        timeout: 12000, validateStatus: () => true,
+      });
+      const d = r.data;
+      if (d && (d.status === 'tunnel' || d.status === 'redirect' || d.status === 'stream') && d.url) return { url: d.url, source: 'cobalt' };
+      if (d && d.status === 'picker' && d.picker?.[0]?.url) return { url: d.picker[0].url, source: 'cobalt' };
+    } catch {}
+    // Schema antigo (v7): POST em /api/json
+    try {
+      const r = await axios.post(`${base}/api/json`, { url: ytUrl, isAudioOnly: true, aFormat: 'mp3' }, {
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        timeout: 12000, validateStatus: () => true,
+      });
+      const d = r.data;
+      if (d && (d.status === 'stream' || d.status === 'redirect') && d.url) return { url: d.url, source: 'cobalt' };
+    } catch {}
+  }
+  throw new Error('cobalt indisponível');
+}
+
+// Obtém um arquivo de mídia (áudio ou vídeo) com o áudio da música.
+async function acquireMediaFile(videoId, job) {
+  // 1. cobalt (só áudio — leve e rápido, infra externa não-bloqueada)
+  try {
+    const { url, source } = await fetchFromCobalt(videoId);
+    const dest = `/tmp/uw_a_${videoId}.mp3`;
+    await downloadUrlToFile(url, dest);
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) return { path: dest, source };
+  } catch (e) { console.warn(`🎵 cobalt falhou [${videoId}]: ${e.message}`); }
+  if (job) job.progress = 35;
+  // 2. yt-dlp (funciona às vezes, mesmo na nuvem, com cookies)
+  try { const { path: p } = await downloadVideoWithYtDlp(videoId); return { path: p, source: 'yt-dlp' }; }
+  catch (e) { console.warn(`🎵 yt-dlp falhou [${videoId}]: ${e.message}`); }
+  if (job) job.progress = 48;
+  // 3. playwright (último recurso)
+  const { path: p } = await downloadVideoWithPlaywright(videoId);
+  return { path: p, source: 'playwright' };
+}
+
+// Decodifica qualquer mídia para PCM mono Float32 via ffmpeg
+function decodeToMonoPCM(inputPath, sr = 22050) {
+  return new Promise((resolve, reject) => {
+    const ffBin = FFMPEG_LOCATION ? path.join(FFMPEG_LOCATION, 'ffmpeg') : 'ffmpeg';
+    const proc = spawn(ffBin, ['-hide_banner', '-loglevel', 'error', '-i', inputPath, '-ac', '1', '-ar', String(sr), '-f', 'f32le', 'pipe:1']);
+    const chunks = []; let err = '';
+    proc.stdout.on('data', d => chunks.push(d));
+    proc.stderr.on('data', d => { err += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error('ffmpeg decode ' + code + ': ' + err.slice(-200)));
+      const buf  = Buffer.concat(chunks);
+      const need = buf.length - (buf.length % 4);
+      const ab   = new ArrayBuffer(need);
+      new Uint8Array(ab).set(buf.subarray(0, need));
+      resolve({ samples: new Float32Array(ab), sampleRate: sr });
+    });
+  });
+}
+
+// Detecção de batidas: envelope de energia RMS → função de onset (fluxo positivo) →
+// pico adaptativo. Para cada batida calcula força (0..1) e duração sustentada (holds).
+function analyzeBeats(samples, sr) {
+  const hop = Math.floor(sr * 0.01);   // frames de 10ms
+  const win = Math.floor(sr * 0.046);  // janela ~46ms
+  if (samples.length < win * 4) return [];
+  const nFrames = Math.floor((samples.length - win) / hop);
+
+  const env = new Float32Array(nFrames);
+  for (let f = 0; f < nFrames; f++) {
+    let e = 0; const s = f * hop;
+    for (let j = 0; j < win; j++) { const v = samples[s + j]; e += v * v; }
+    env[f] = Math.sqrt(e / win);
+  }
+
+  const flux = new Float32Array(nFrames);
+  for (let i = 1; i < nFrames; i++) { const d = env[i] - env[i - 1]; flux[i] = d > 0 ? d : 0; }
+
+  const frameDur = hop / sr;
+  const ctxF     = Math.max(1, Math.round(0.65 / frameDur)); // contexto 650ms
+  const minGapF  = Math.max(1, Math.round(0.11 / frameDur)); // gap mínimo 110ms
+  const beats = [];
+  let lastB = -minGapF;
+
+  for (let i = 2; i < nFrames - 2; i++) {
+    let avg = 0, cnt = 0;
+    const lo = Math.max(0, i - ctxF), hi = Math.min(nFrames - 1, i + ctxF);
+    for (let j = lo; j <= hi; j++) { avg += flux[j]; cnt++; }
+    avg /= cnt;
+    const v = flux[i];
+    if (v > avg * 1.45 && v > flux[i - 1] && v >= flux[i + 1] && (i - lastB) >= minGapF && v > 1e-5) {
+      const t    = i * frameDur;
+      const peak = Math.max(env[i], env[i + 1] || 0);
+      const thr  = peak * 0.55;
+      let k = i + 1;
+      while (k < nFrames && env[k] >= thr) k++;
+      const sustain = (k - i) * frameDur;
+      beats.push({ t, strength: v, sustain });
+      lastB = i;
+    }
+  }
+
+  let mx = 0; for (const b of beats) if (b.strength > mx) mx = b.strength;
+  if (mx > 0) for (const b of beats) b.strength = b.strength / mx;
+  return beats;
+}
+
+// Pipeline completo: obtém áudio → decodifica → detecta → monta o mapa
+async function buildBeatmap(videoId, job) {
+  if (!ffmpegReady) { if (job) job.progress = 8; await waitFor(() => ffmpegReady, 60000); }
+  if (!ffmpegReady) throw new Error('ffmpeg não está pronto');
+  if (job) job.progress = 14;
+
+  const { path: mediaPath, source } = await acquireMediaFile(videoId, job);
+  if (job) job.progress = 64;
+
+  let result;
+  try {
+    const { samples, sampleRate } = await decodeToMonoPCM(mediaPath);
+    if (job) job.progress = 80;
+    const duration = samples.length / sampleRate;
+    const det = analyzeBeats(samples, sampleRate);
+    if (job) job.progress = 95;
+    result = {
+      beats:     det.map(b => +b.t.toFixed(3)),
+      sustains:  det.map(b => +b.sustain.toFixed(3)),
+      strengths: det.map(b => +b.strength.toFixed(3)),
+      duration:  +duration.toFixed(2),
+      source,
+    };
+  } finally {
+    fs.unlink(mediaPath, () => {});
+  }
+  if (!result.beats.length) throw new Error('nenhuma batida detectada');
+  return result;
+}
+
+const beatmapJobs = new Map(); // videoId → { status, progress, result, error }
+
+async function getCachedBeatmap(videoId) {
+  try {
+    const { data, error } = await supabase.from('beatmaps')
+      .select('beats,sustains,strengths,duration,source').eq('video_id', videoId).maybeSingle();
+    if (error || !data || !Array.isArray(data.beats) || !data.beats.length) return null;
+    return data;
+  } catch { return null; }
+}
+async function saveBeatmap(videoId, result) {
+  try {
+    await supabase.from('beatmaps').upsert({
+      video_id: videoId, beats: result.beats, sustains: result.sustains,
+      strengths: result.strengths, duration: result.duration, source: result.source,
+    });
+  } catch (e) { console.warn('saveBeatmap:', e.message); }
+}
+
+// Endpoint único: cache-hit responde na hora; senão inicia o job e o cliente faz polling.
+app.get('/api/uniko/beatmap/:videoId', async (req, res) => {
+  const { videoId } = req.params;
+  if (!YT_ID_RE.test(videoId)) return res.json({ status: 'error', error: 'videoId inválido' });
+
+  const cached = await getCachedBeatmap(videoId);
+  if (cached) return res.json({
+    status: 'ready', cached: true,
+    beats: cached.beats, sustains: cached.sustains || [], strengths: cached.strengths || [],
+    duration: cached.duration || 0, source: cached.source || 'cache',
+  });
+
+  let job = beatmapJobs.get(videoId);
+  if (!job) {
+    job = { status: 'analyzing', progress: 5 };
+    beatmapJobs.set(videoId, job);
+    console.log(`🎼 Analisando ritmo: ${videoId}`);
+    buildBeatmap(videoId, job).then(async (result) => {
+      job.result = result; job.status = 'ready'; job.progress = 100;
+      await saveBeatmap(videoId, result);
+      console.log(`✓ beatmap ${videoId}: ${result.beats.length} batidas (${result.source})`);
+      setTimeout(() => beatmapJobs.delete(videoId), 5 * 60 * 1000);
+    }).catch((err) => {
+      job.status = 'error'; job.error = err.message;
+      console.error(`✗ beatmap falhou [${videoId}]: ${err.message}`);
+      setTimeout(() => beatmapJobs.delete(videoId), 60 * 1000);
+    });
+  }
+
+  if (job.status === 'ready') return res.json({ status: 'ready', cached: false, ...job.result });
+  if (job.status === 'error') return res.json({ status: 'error', error: job.error });
+  return res.json({ status: 'analyzing', progress: job.progress || 10 });
+});
+
+// ═══════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════
 
