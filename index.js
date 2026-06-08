@@ -2665,6 +2665,17 @@ async function fetchFromCobalt(videoId) {
 
 // yt-dlp pegando SÓ O ÁUDIO (bestaudio). Muito mais disponível que vídeo ≤480p,
 // que é o que costuma faltar/ser gateado. Para análise de ritmo, áudio basta.
+function runProc(bin, args) {
+  return new Promise((resolve) => {
+    const proc = spawn(bin, args);
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', (e) => resolve({ code: -1, stdout, stderr: e.message }));
+    proc.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
 async function downloadAudioWithYtDlp(videoId) {
   if (!ytdlpReady) await waitFor(() => ytdlpReady, 60000);
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
@@ -2673,30 +2684,32 @@ async function downloadAudioWithYtDlp(videoId) {
   // Com PO token: 'tv' PRIMEIRO — é o único que dá URL direta + aceita POT.
   // web/web_safari são forçados a SABR (sem URL) → "format not available" mesmo com POT.
   const clients = usePot ? 'tv,mweb,web_safari,web' : 'tv,android_vr,tv_embedded,ios';
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
 
-  const args = [
-    '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
-    '--extractor-args', `youtube:player_client=${clients}`,
-    '-f', 'bestaudio/best',
-    '-o', `/tmp/uw_a_${videoId}.%(ext)s`,
-  ];
+  // Args comuns de extração (sem seletor de formato/output) — reusados no diagnóstico
+  const extractArgs = ['--no-playlist', '--force-overwrites',
+    '--extractor-args', `youtube:player_client=${clients}`];
   if (usePot) {
-    args.push('--plugin-dirs', POT_PLUGIN_DIR);
-    args.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
+    extractArgs.push('--plugin-dirs', POT_PLUGIN_DIR);
+    extractArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
   }
-  if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
-  if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
-  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+  if (FFMPEG_LOCATION) extractArgs.push('--ffmpeg-location', FFMPEG_LOCATION);
+  // Com POT usamos acesso ANÔNIMO: o POT é anônimo e cookies de conta logada
+  // conflitam, causando "format not available". Sem POT, os cookies ajudam.
+  if (ytCookiesOk && !usePot) extractArgs.push('--cookies', YTCOOKIES_FILE);
 
-  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId}...`);
-  await new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP_BIN, args);
-    let stderr = '';
-    proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', (code) => code === 0 ? resolve()
-      : reject(new Error(`yt-dlp áudio código ${code}: ${stderr.trim().slice(-600)}`)));
-  });
+  const args = [...extractArgs, '--no-warnings', '--no-progress',
+    '-f', 'bestaudio/best', '-o', `/tmp/uw_a_${videoId}.%(ext)s`, url];
+
+  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (POT=${usePot}, cookies=${ytCookiesOk && !usePot})...`);
+  const r = await runProc(YTDLP_BIN, args);
+
+  if (r.code !== 0) {
+    // Diagnóstico: lista o que o YouTube realmente devolveu (mostra avisos de SABR/POT)
+    const diag = await runProc(YTDLP_BIN, [...extractArgs, '-F', url]);
+    console.log(`🔎 Formatos [${videoId}]:\n${(diag.stdout + diag.stderr).slice(-1800)}`);
+    throw new Error(`yt-dlp áudio código ${r.code}: ${r.stderr.trim().slice(-600)}`);
+  }
 
   const found = fs.readdirSync('/tmp').find(f => f.startsWith(`uw_a_${videoId}.`) && !f.endsWith('.part'));
   if (!found) throw new Error('yt-dlp áudio terminou mas o arquivo não foi encontrado');
