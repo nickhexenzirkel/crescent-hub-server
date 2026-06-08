@@ -2640,9 +2640,10 @@ async function downloadAudioWithYtDlp(videoId) {
 
   const args = [
     '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
-    // Tenta vários clientes p/ maximizar formatos disponíveis em IP de nuvem
-    '--extractor-args', 'youtube:player_client=web_safari,web,android,ios',
-    '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+    // Clientes que NÃO exigem PO token (tv/android_vr) — únicos que funcionam
+    // de IP de datacenter. web/web_safari/android exigem PO token e falham na nuvem.
+    '--extractor-args', 'youtube:player_client=tv,android_vr,tv_embedded,ios',
+    '-f', 'bestaudio/best',
     '-o', `/tmp/uw_a_${videoId}.%(ext)s`,
   ];
   if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
