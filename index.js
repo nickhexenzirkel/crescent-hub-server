@@ -29,6 +29,17 @@ let ffmpegReady   = false;
 let playwrightReady = false;
 let ytCookiesOk   = false;
 
+// ─── Runtime JS para o desafio nsig do YouTube ───────────────────────────────
+// Desde 2025 o YouTube exige executar JS para decifrar a assinatura/nsig.
+// O binário standalone do yt-dlp já traz o yt-dlp-ejs embutido — só falta
+// apontar um runtime JS. Reutilizamos o MESMO Node que roda este servidor
+// (process.execPath). Sem isso, o YouTube só devolve storyboards (imagens) e o
+// download falha com "Requested format is not available". Requer Node ≥22.
+const JS_RUNTIME_ARGS = ['--js-runtimes', `node:${process.execPath}`];
+if (Number(process.versions.node.split('.')[0]) < 22) {
+  console.warn(`⚠️  Node ${process.versions.node} < 22 — o runtime JS do yt-dlp exige Node ≥22; o nsig pode falhar.`);
+}
+
 // Escreve cookies do env var em arquivo (necessário para IPs de cloud)
 if (process.env.YOUTUBE_COOKIES) {
   try {
@@ -2440,6 +2451,7 @@ async function downloadVideoWithYtDlp(videoId) {
   }
 
   const args = [
+    ...JS_RUNTIME_ARGS,
     '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
     // Prefere progressivo mp4; senão une o melhor vídeo+áudio (≤480p) via ffmpeg
     '-f', 'best[height<=480][ext=mp4][acodec!=none][vcodec!=none]'
@@ -2687,7 +2699,7 @@ async function downloadAudioWithYtDlp(videoId) {
   const url = `https://www.youtube.com/watch?v=${videoId}`;
 
   // Args comuns de extração (sem seletor de formato/output) — reusados no diagnóstico
-  const extractArgs = ['--no-playlist', '--force-overwrites',
+  const extractArgs = [...JS_RUNTIME_ARGS, '--no-playlist', '--force-overwrites',
     '--extractor-args', `youtube:player_client=${clients}`,
     '--extractor-retries', '3', '--retry-sleep', 'extractor:3'];
   if (usePot) {
