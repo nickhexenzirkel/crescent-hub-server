@@ -2670,8 +2670,9 @@ async function downloadAudioWithYtDlp(videoId) {
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
 
   const usePot = !!(POT_PROVIDER_URL && potPluginReady);
-  // Com PO token: usa clientes web (mais formatos). Sem ele: tv/android_vr (sem POT).
-  const clients = usePot ? 'web_safari,web,mweb,tv' : 'tv,android_vr,tv_embedded,ios';
+  // Com PO token: 'tv' PRIMEIRO — é o único que dá URL direta + aceita POT.
+  // web/web_safari são forçados a SABR (sem URL) → "format not available" mesmo com POT.
+  const clients = usePot ? 'tv,mweb,web_safari,web' : 'tv,android_vr,tv_embedded,ios';
 
   const args = [
     '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
@@ -2694,7 +2695,7 @@ async function downloadAudioWithYtDlp(videoId) {
     proc.stderr.on('data', d => { stderr += d.toString(); });
     proc.on('error', reject);
     proc.on('close', (code) => code === 0 ? resolve()
-      : reject(new Error(`yt-dlp áudio código ${code}: ${stderr.trim().slice(-300)}`)));
+      : reject(new Error(`yt-dlp áudio código ${code}: ${stderr.trim().slice(-600)}`)));
   });
 
   const found = fs.readdirSync('/tmp').find(f => f.startsWith(`uw_a_${videoId}.`) && !f.endsWith('.part'));
