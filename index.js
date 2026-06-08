@@ -2721,13 +2721,15 @@ async function downloadAudioWithYtDlp(videoId) {
 
 // Obtém um arquivo de mídia (áudio ou vídeo) com o áudio da música.
 async function acquireMediaFile(videoId, job) {
-  // 1. cobalt (se houver instância configurada/funcionando)
-  try {
-    const { url, source } = await fetchFromCobalt(videoId);
-    const dest = `/tmp/uw_c_${videoId}.mp3`;
-    await downloadUrlToFile(url, dest);
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) return { path: dest, source };
-  } catch (e) { console.warn(`🎵 cobalt falhou [${videoId}]: ${e.message}`); }
+  // 1. cobalt — desligado por padrão; só tenta se COBALT_API estiver definido
+  if (process.env.COBALT_API) {
+    try {
+      const { url, source } = await fetchFromCobalt(videoId);
+      const dest = `/tmp/uw_c_${videoId}.mp3`;
+      await downloadUrlToFile(url, dest);
+      if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) return { path: dest, source };
+    } catch (e) { console.warn(`🎵 cobalt falhou [${videoId}]: ${e.message}`); }
+  }
   if (job) job.progress = 28;
   // 2. yt-dlp ÁUDIO puro (caminho principal — bestaudio quase sempre disponível)
   try { return await downloadAudioWithYtDlp(videoId); }
