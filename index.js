@@ -2598,6 +2598,37 @@ function downloadUrlToFile(url, dest) {
   });
 }
 
+// ─── PO TOKEN (bgutil) ───────────────────────────────────────────────
+// Faz o yt-dlp voltar a funcionar de IP de datacenter (Render). O provedor
+// (serviço separado, imagem brainicism/bgutil-ytdlp-pot-provider) gera os
+// PO tokens que os clientes web do YouTube exigem. Só ativa se POT_PROVIDER_URL
+// estiver definido — sem ele, nada muda (yt-dlp usa clientes tv/android_vr).
+const POT_PROVIDER_URL = (process.env.POT_PROVIDER_URL || '').replace(/\/+$/, '');
+const POT_PLUGIN_DIR   = '/tmp/ytdlp-plugins';
+let potPluginReady = false;
+
+async function ensurePotPlugin() {
+  if (!POT_PROVIDER_URL) {
+    console.log('ℹ️  POT_PROVIDER_URL não definido — yt-dlp usará clientes sem PO token.');
+    return;
+  }
+  try {
+    fs.mkdirSync(POT_PLUGIN_DIR, { recursive: true });
+    const dest = path.join(POT_PLUGIN_DIR, 'bgutil-ytdlp-pot-provider.zip');
+    await downloadUrlToFile(
+      'https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/latest/download/bgutil-ytdlp-pot-provider.zip',
+      dest
+    );
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 1000) {
+      potPluginReady = true;
+      console.log(`🔑 Plugin PO token instalado (provider: ${POT_PROVIDER_URL})`);
+    } else {
+      console.warn('⚠️  Plugin PO token baixado vazio.');
+    }
+  } catch (e) { console.warn('⚠️  Falha ao instalar plugin PO token:', e.message); }
+}
+ensurePotPlugin();
+
 // Pede o áudio a uma instância do cobalt (serviço externo não-bloqueado pelo YouTube).
 // Configurável via COBALT_API (URL da instância) e COBALT_KEY (Api-Key, se exigida).
 async function fetchFromCobalt(videoId) {
@@ -2638,14 +2669,20 @@ async function downloadAudioWithYtDlp(videoId) {
   if (!ytdlpReady) await waitFor(() => ytdlpReady, 60000);
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
 
+  const usePot = !!(POT_PROVIDER_URL && potPluginReady);
+  // Com PO token: usa clientes web (mais formatos). Sem ele: tv/android_vr (sem POT).
+  const clients = usePot ? 'web_safari,web,mweb,tv' : 'tv,android_vr,tv_embedded,ios';
+
   const args = [
     '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
-    // Clientes que NÃO exigem PO token (tv/android_vr) — únicos que funcionam
-    // de IP de datacenter. web/web_safari/android exigem PO token e falham na nuvem.
-    '--extractor-args', 'youtube:player_client=tv,android_vr,tv_embedded,ios',
+    '--extractor-args', `youtube:player_client=${clients}`,
     '-f', 'bestaudio/best',
     '-o', `/tmp/uw_a_${videoId}.%(ext)s`,
   ];
+  if (usePot) {
+    args.push('--plugin-dirs', POT_PLUGIN_DIR);
+    args.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
+  }
   if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
   if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
   args.push(`https://www.youtube.com/watch?v=${videoId}`);
