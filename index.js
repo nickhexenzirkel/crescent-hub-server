@@ -2632,21 +2632,59 @@ async function fetchFromCobalt(videoId) {
   throw new Error('cobalt indisponível');
 }
 
+// yt-dlp pegando SÓ O ÁUDIO (bestaudio). Muito mais disponível que vídeo ≤480p,
+// que é o que costuma faltar/ser gateado. Para análise de ritmo, áudio basta.
+async function downloadAudioWithYtDlp(videoId) {
+  if (!ytdlpReady) await waitFor(() => ytdlpReady, 60000);
+  if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
+
+  const args = [
+    '--no-playlist', '--no-warnings', '--no-progress', '--force-overwrites',
+    // Tenta vários clientes p/ maximizar formatos disponíveis em IP de nuvem
+    '--extractor-args', 'youtube:player_client=web_safari,web,android,ios',
+    '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+    '-o', `/tmp/uw_a_${videoId}.%(ext)s`,
+  ];
+  if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
+  if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
+  args.push(`https://www.youtube.com/watch?v=${videoId}`);
+
+  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId}...`);
+  await new Promise((resolve, reject) => {
+    const proc = spawn(YTDLP_BIN, args);
+    let stderr = '';
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => code === 0 ? resolve()
+      : reject(new Error(`yt-dlp áudio código ${code}: ${stderr.trim().slice(-300)}`)));
+  });
+
+  const found = fs.readdirSync('/tmp').find(f => f.startsWith(`uw_a_${videoId}.`) && !f.endsWith('.part'));
+  if (!found) throw new Error('yt-dlp áudio terminou mas o arquivo não foi encontrado');
+  const p = `/tmp/${found}`;
+  console.log(`✓ áudio ${videoId} baixado (${fs.statSync(p).size} bytes)`);
+  return { path: p, source: 'yt-dlp-audio' };
+}
+
 // Obtém um arquivo de mídia (áudio ou vídeo) com o áudio da música.
 async function acquireMediaFile(videoId, job) {
-  // 1. cobalt (só áudio — leve e rápido, infra externa não-bloqueada)
+  // 1. cobalt (se houver instância configurada/funcionando)
   try {
     const { url, source } = await fetchFromCobalt(videoId);
-    const dest = `/tmp/uw_a_${videoId}.mp3`;
+    const dest = `/tmp/uw_c_${videoId}.mp3`;
     await downloadUrlToFile(url, dest);
     if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) return { path: dest, source };
   } catch (e) { console.warn(`🎵 cobalt falhou [${videoId}]: ${e.message}`); }
-  if (job) job.progress = 35;
-  // 2. yt-dlp (funciona às vezes, mesmo na nuvem, com cookies)
+  if (job) job.progress = 28;
+  // 2. yt-dlp ÁUDIO puro (caminho principal — bestaudio quase sempre disponível)
+  try { return await downloadAudioWithYtDlp(videoId); }
+  catch (e) { console.warn(`🎵 yt-dlp áudio falhou [${videoId}]: ${e.message}`); }
+  if (job) job.progress = 40;
+  // 3. yt-dlp vídeo (caso o áudio puro falhe)
   try { const { path: p } = await downloadVideoWithYtDlp(videoId); return { path: p, source: 'yt-dlp' }; }
-  catch (e) { console.warn(`🎵 yt-dlp falhou [${videoId}]: ${e.message}`); }
-  if (job) job.progress = 48;
-  // 3. playwright (último recurso)
+  catch (e) { console.warn(`🎵 yt-dlp vídeo falhou [${videoId}]: ${e.message}`); }
+  if (job) job.progress = 50;
+  // 4. playwright (último recurso)
   const { path: p } = await downloadVideoWithPlaywright(videoId);
   return { path: p, source: 'playwright' };
 }
