@@ -148,7 +148,7 @@ function initAlexa() {
   alexa = new AlexaRemote();
 
   const config = {
-    alexaServiceHost: 'alexa.amazon.com',
+    alexaServiceHost: 'alexa.amazon.com.br',
     listeningPort:    0,
     useWsMqtt:        false,
     logger:           false,

@@ -1,3 +1,6 @@
+// Força IPv4: a rota IPv6 pra Amazon está quebrada nesta rede e dá ETIMEDOUT no proxy
+require('dns').setDefaultResultOrder('ipv4first');
+
 const AlexaRemote = require('alexa-remote2');
 const alexa = new AlexaRemote();
 
@@ -16,10 +19,15 @@ alexa.on('cookie', (cookie, csrf, macDms) => {
 });
 
 alexa.init({
-  proxyOnly:     true,
-  proxyPort:     PORT,
-  proxyOwnIp:    'localhost',
-  proxyLogLevel: 'warn',
+  proxyOnly:        true,
+  proxyPort:        PORT,
+  proxyOwnIp:       'localhost',
+  proxyLogLevel:    'warn',
+  // Conta brasileira: mirar amazon.com.br/pt-BR evita o bloqueio de "atividade incomum"
+  // que acontecia ao logar via www.amazon.com (EUA)
+  amazonPage:       'amazon.com.br',
+  acceptLanguage:   'pt-BR',
+  alexaServiceHost: 'alexa.amazon.com.br',
 }, (err) => {
   if (err) {
     const msg = String(err.message || err);
@@ -28,6 +36,6 @@ alexa.init({
 });
 
 setTimeout(() => {
-  console.log('\n⏰ Timeout de 3 minutos — rode novamente se necessário');
+  console.log('\n⏰ Timeout de 10 minutos — rode novamente se necessário');
   process.exit(1);
-}, 180000);
+}, 600000);
