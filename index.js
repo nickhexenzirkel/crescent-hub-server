@@ -2688,47 +2688,66 @@ function runProc(bin, args) {
   });
 }
 
+// Monta os args de extração para um conjunto de clientes do YouTube.
+function buildExtractArgs(clients, usePot) {
+  const a = [...JS_RUNTIME_ARGS, '--no-playlist', '--force-overwrites',
+    '--extractor-args', `youtube:player_client=${clients}`,
+    '--extractor-retries', '3', '--retry-sleep', 'extractor:3'];
+  if (usePot) {
+    a.push('--plugin-dirs', POT_PLUGIN_DIR);
+    a.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
+  }
+  if (FFMPEG_LOCATION) a.push('--ffmpeg-location', FFMPEG_LOCATION);
+  // Cookies SÃO necessários para passar o "confirm you're not a bot" na nuvem.
+  // Com cookies, o POT é vinculado à conta (datasync) — combinação correta.
+  if (ytCookiesOk) a.push('--cookies', YTCOOKIES_FILE);
+  return a;
+}
+
 async function downloadAudioWithYtDlp(videoId) {
   if (!ytdlpReady) await waitFor(() => ytdlpReady, 60000);
   if (!ytdlpReady) throw new Error('yt-dlp não está pronto');
 
   const usePot = !!(POT_PROVIDER_URL && potPluginReady);
-  // 'tv' é o único cliente que dá URL direta (web/web_safari = SABR sem URL) e
-  // aceita POT. Um único cliente = 1 requisição → evita o rate-limit 429.
-  const clients = usePot ? 'tv' : 'tv,android_vr,tv_embedded,ios';
+  // O 'tv' dá URL direta e costuma funcionar, mas é bot-checked de forma
+  // INTERMITENTE em IP de datacenter (um vídeo passa, o próximo não). Em vez de
+  // desistir no 1º "não sou robô", reentamos com outros clientes que consomem o
+  // PO token (web_safari/mweb/tv_embedded). Só roda em SEQUÊNCIA e só após falha,
+  // então não multiplica requisições no caso comum (1ª tentativa já resolve).
+  const clientSets = usePot
+    ? ['tv', 'web_safari', 'mweb', 'tv_embedded']
+    : ['tv,android_vr,tv_embedded,ios'];
   const url = `https://www.youtube.com/watch?v=${videoId}`;
 
-  // Args comuns de extração (sem seletor de formato/output) — reusados no diagnóstico
-  const extractArgs = [...JS_RUNTIME_ARGS, '--no-playlist', '--force-overwrites',
-    '--extractor-args', `youtube:player_client=${clients}`,
-    '--extractor-retries', '3', '--retry-sleep', 'extractor:3'];
-  if (usePot) {
-    extractArgs.push('--plugin-dirs', POT_PLUGIN_DIR);
-    extractArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${POT_PROVIDER_URL}`);
+  let lastErr = '', lastExtractArgs = null;
+  for (let attempt = 0; attempt < clientSets.length; attempt++) {
+    const clients = clientSets[attempt];
+    const extractArgs = buildExtractArgs(clients, usePot);
+    lastExtractArgs = extractArgs;
+    const args = [...extractArgs, '--no-warnings', '--no-progress',
+      '-f', 'bestaudio/best', '-o', `/tmp/uw_a_${videoId}.%(ext)s`, url];
+
+    console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (cliente=${clients}, POT=${usePot}, cookies=${ytCookiesOk})...`);
+    const r = await runProc(YTDLP_BIN, args);
+
+    if (r.code === 0) {
+      const found = fs.readdirSync('/tmp').find(f => f.startsWith(`uw_a_${videoId}.`) && !f.endsWith('.part'));
+      if (found) {
+        const p = `/tmp/${found}`;
+        console.log(`✓ áudio ${videoId} baixado (${fs.statSync(p).size} bytes, cliente=${clients})`);
+        return { path: p, source: 'yt-dlp-audio' };
+      }
+    }
+    lastErr = (r.stderr || '').trim().slice(-300);
+    console.warn(`↻ cliente ${clients} falhou [${videoId}]: ${lastErr.slice(-180)}`);
+    // Backoff curto entre clientes — alivia bot-check/429 intermitente.
+    if (attempt < clientSets.length - 1) await new Promise(res => setTimeout(res, 2500));
   }
-  if (FFMPEG_LOCATION) extractArgs.push('--ffmpeg-location', FFMPEG_LOCATION);
-  // Cookies SÃO necessários para passar o "confirm you're not a bot" na nuvem.
-  // Com cookies, o POT é vinculado à conta (datasync) — combinação correta.
-  if (ytCookiesOk) extractArgs.push('--cookies', YTCOOKIES_FILE);
 
-  const args = [...extractArgs, '--no-warnings', '--no-progress',
-    '-f', 'bestaudio/best', '-o', `/tmp/uw_a_${videoId}.%(ext)s`, url];
-
-  console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (POT=${usePot}, cookies=${ytCookiesOk})...`);
-  const r = await runProc(YTDLP_BIN, args);
-
-  if (r.code !== 0) {
-    // Diagnóstico: lista o que o YouTube realmente devolveu (mostra avisos de SABR/POT)
-    const diag = await runProc(YTDLP_BIN, [...extractArgs, '-F', url]);
-    console.log(`🔎 Formatos [${videoId}]:\n${(diag.stdout + diag.stderr).slice(-1800)}`);
-    throw new Error(`yt-dlp áudio código ${r.code}: ${r.stderr.trim().slice(-600)}`);
-  }
-
-  const found = fs.readdirSync('/tmp').find(f => f.startsWith(`uw_a_${videoId}.`) && !f.endsWith('.part'));
-  if (!found) throw new Error('yt-dlp áudio terminou mas o arquivo não foi encontrado');
-  const p = `/tmp/${found}`;
-  console.log(`✓ áudio ${videoId} baixado (${fs.statSync(p).size} bytes)`);
-  return { path: p, source: 'yt-dlp-audio' };
+  // Diagnóstico final: lista o que o YouTube devolveu no último cliente tentado.
+  const diag = await runProc(YTDLP_BIN, [...(lastExtractArgs || buildExtractArgs(clientSets[0], usePot)), '-F', url]);
+  console.log(`🔎 Formatos [${videoId}]:\n${(diag.stdout + diag.stderr).slice(-1800)}`);
+  throw new Error(`yt-dlp áudio: todos os clientes (${clientSets.join(' → ')}) falharam — ${lastErr}`);
 }
 
 // Obtém um arquivo de mídia (áudio ou vídeo) com o áudio da música.
