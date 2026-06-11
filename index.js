@@ -136,36 +136,80 @@ let alexa        = null;
 let alexaOk      = false;
 let alexaDevices = [];
 
-function initAlexa() {
-  const hasCredentials = process.env.AMAZON_EMAIL && process.env.AMAZON_PASSWORD;
-  const hasRegData     = !!process.env.ALEXA_REGISTRATION_DATA;
+// Persiste o registration data (renovado pelo alexa-remote2) no Supabase para
+// sobreviver a restarts do Render. Sem isso, todo restart recarrega o token da
+// env var — que envelhece — e força um novo login manual via setup-alexa.js.
+async function saveAlexaReg(reg) {
+  if (!reg) return;
+  try {
+    await supabase.from('settings').upsert(
+      { key: 'alexa_registration_data', value: JSON.stringify(reg) },
+      { onConflict: 'key' }
+    );
+    console.log('🔑 Alexa: registration data salvo no Supabase.');
+  } catch (e) {
+    console.error('⚠️  saveAlexaReg:', e.message);
+  }
+}
 
-  if (!hasCredentials && !hasRegData) {
+// Lê o registration data do Supabase; na 1ª vez usa a env var como semente
+// (e já grava no Supabase), para a renovação automática começar a partir dela.
+async function loadAlexaReg() {
+  try {
+    const { data } = await supabase
+      .from('settings').select('value').eq('key', 'alexa_registration_data').maybeSingle();
+    if (data?.value) {
+      console.log('🔑 Alexa: registration data carregado do Supabase.');
+      return JSON.parse(data.value);
+    }
+  } catch (e) {
+    console.error('⚠️  loadAlexaReg:', e.message);
+  }
+  if (process.env.ALEXA_REGISTRATION_DATA) {
+    try {
+      const reg = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
+      console.log('🔑 Alexa: semeando registration data da env var no Supabase.');
+      await saveAlexaReg(reg);
+      return reg;
+    } catch {
+      console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
+    }
+  }
+  return null;
+}
+
+async function initAlexa() {
+  const hasCredentials = process.env.AMAZON_EMAIL && process.env.AMAZON_PASSWORD;
+  const reg = await loadAlexaReg();
+
+  if (!hasCredentials && !reg) {
     console.log('⚠️  Alexa: configure AMAZON_EMAIL/AMAZON_PASSWORD ou ALEXA_REGISTRATION_DATA no Render');
     return;
   }
 
   alexa = new AlexaRemote();
 
+  // Toda vez que o alexa-remote2 renova o cookie, persistimos o registro novo.
+  // É isso que mantém o token vivo indefinidamente sem re-login manual.
+  alexa.on('cookie', () => {
+    saveAlexaReg(alexa.cookieData || alexa._options?.formerRegistrationData);
+  });
+
   const config = {
     alexaServiceHost: 'alexa.amazon.com.br',
     listeningPort:    0,
     useWsMqtt:        false,
     logger:           false,
+    // Renova o cookie a cada 4 dias (ms); cada renovação dispara o evento
+    // 'cookie' acima, mantendo o Supabase sempre com um token fresco.
+    cookieRefreshInterval: 4 * 24 * 60 * 60 * 1000,
   };
 
-  if (hasRegData) {
-    try {
-      const reg = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
-      config.formerRegistrationData = reg;
-      if (reg.macDms)      config.macDms     = reg.macDms;
-      if (reg.amazonPage)  config.amazonPage = reg.amazonPage;
-      if (reg.localCookie) config.cookie     = reg.localCookie;
-      console.log('🔑 Alexa: usando ALEXA_REGISTRATION_DATA');
-    } catch {
-      console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
-      return;
-    }
+  if (reg) {
+    config.formerRegistrationData = reg;
+    if (reg.macDms)      config.macDms     = reg.macDms;
+    if (reg.amazonPage)  config.amazonPage = reg.amazonPage;
+    if (reg.localCookie) config.cookie     = reg.localCookie;
   } else {
     config.email    = process.env.AMAZON_EMAIL;
     config.password = process.env.AMAZON_PASSWORD;
@@ -175,7 +219,7 @@ function initAlexa() {
     if (err) {
       // Ignora erro de login por browser (registration data expirada) — não polui logs
       if (err.message?.includes('open http')) {
-        console.warn('⚠️  Alexa: registration data expirada. Regere ALEXA_REGISTRATION_DATA no Render.');
+        console.warn('⚠️  Alexa: registration data expirada. Regere o token (setup-alexa.js) e atualize no Render.');
       } else {
         console.error('❌ Alexa init:', err.message);
       }
@@ -183,6 +227,8 @@ function initAlexa() {
     }
     alexaOk = true;
     console.log('🔊 Alexa Remote conectada!');
+    // Garante que o registro pós-init (pode ter sido renovado) fique salvo.
+    saveAlexaReg(alexa.cookieData || reg);
     alexa.getDevices((e, data) => {
       if (!e && data?.devices) {
         alexaDevices = data.devices;
