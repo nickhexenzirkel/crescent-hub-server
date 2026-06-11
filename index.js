@@ -1370,6 +1370,71 @@ app.post('/api/devices/wake', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// YOUTUBE — videoclipe da faixa (só o videoId)
+// O áudio continua saindo do Spotify/Echo; o app embute o vídeo MUDO como
+// visual. Sem chave de API: faz scrape da página de resultados e pega o 1º
+// videoId. Cache em 3 camadas como o genre (memória + Supabase + dedup).
+// Só acertos vão pro Supabase — "sem clipe" re-tenta no próximo restart.
+// ═══════════════════════════════════════════════════════
+const ytClipCache   = new Map();   // track_id → videoId | ''  (''=sem clipe nesta sessão)
+const pendingYtClip = new Map();   // track_id → Promise
+
+async function resolveYtVideoId(query) {
+  const url = 'https://www.youtube.com/results?hl=en&gl=US&search_query='
+    + encodeURIComponent(query);
+  const r = await axios.get(url, {
+    timeout: 12000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        + '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cookie': 'CONSENT=YES+1',   // pula o interstício de consentimento
+    },
+  });
+  const m = String(r.data).match(/"videoId":"([\w-]{11})"/);
+  return m ? m[1] : '';
+}
+
+async function fetchYtClip(track_id, query) {
+  if (ytClipCache.has(track_id))   return ytClipCache.get(track_id);
+  if (pendingYtClip.has(track_id)) return pendingYtClip.get(track_id);
+
+  const promise = (async () => {
+    try {
+      // Cache persistente (só guarda acertos)
+      const { data: row } = await supabase
+        .from('settings').select('value').eq('key', `ytclip:${track_id}`).maybeSingle();
+      if (row?.value) {
+        ytClipCache.set(track_id, row.value);
+        return row.value;
+      }
+      const videoId = await resolveYtVideoId(query);
+      ytClipCache.set(track_id, videoId);
+      if (videoId) {
+        await supabase.from('settings').upsert({ key: `ytclip:${track_id}`, value: videoId });
+        console.log(`📺 Clipe cacheado: ${track_id} → ${videoId}`);
+      }
+      return videoId;
+    } catch (err) {
+      console.error('❌ fetchYtClip:', err.message);
+      return ''; // erros não são cacheados — próxima requisição tenta de novo
+    } finally {
+      pendingYtClip.delete(track_id);
+    }
+  })();
+
+  pendingYtClip.set(track_id, promise);
+  return promise;
+}
+
+app.get('/api/youtube/clip', async (req, res) => {
+  const { track_id, q } = req.query;
+  if (!track_id || !q) return res.status(400).json({ error: 'track_id e q obrigatórios' });
+  const videoId = await fetchYtClip(String(track_id), String(q));
+  res.json({ videoId: videoId || null });
+});
+
+// ═══════════════════════════════════════════════════════
 // PLAYLISTS
 // ═══════════════════════════════════════════════════════
 
