@@ -2466,7 +2466,12 @@ async function downloadVideoWithPlaywright(videoId) {
 
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
+    // Flags de BAIXA MEMÓRIA (Render free 512MB): processo único, sem zygote,
+    // V8 limitado e sem features extras. Evita o OOM ao abrir o Chromium.
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--autoplay-policy=no-user-gesture-required',
+      '--single-process', '--no-zygote', '--disable-features=site-per-process,Translate,BackForwardCache',
+      '--disable-extensions', '--disable-background-networking', '--mute-audio',
+      '--js-flags=--max-old-space-size=128'],
   });
 
   let chosenFormat = null;
@@ -2986,6 +2991,10 @@ function analyzeBeats(samples, sr) {
 
 // Pipeline completo: obtém áudio → decodifica → detecta → monta o mapa
 async function buildBeatmap(videoId, job) {
+  // Guarda de memória (Render free = 512MB): se já estamos altos, aborta a análise
+  // em vez de derrubar o servidor — o cliente cai no ritmo estimado.
+  const rssMB = process.memoryUsage().rss / 1048576;
+  if (rssMB > 430) throw new Error(`memória alta no servidor (${Math.round(rssMB)}MB) — tente de novo em instantes`);
   if (!ffmpegReady) { if (job) job.progress = 8; await waitFor(() => ffmpegReady, 60000); }
   if (!ffmpegReady) throw new Error('ffmpeg não está pronto');
   if (job) job.progress = 14;
@@ -3015,6 +3024,27 @@ async function buildBeatmap(videoId, job) {
 }
 
 const beatmapJobs = new Map(); // videoId → { status, progress, result, error }
+
+// Serializa as análises de ritmo: só UMA roda por vez. yt-dlp/ffmpeg/Chromium são
+// pesados e rodar em paralelo (ex.: celular tentando/repetindo) estoura os 512MB
+// do Render. As demais aguardam na fila (o cliente continua fazendo polling).
+let _beatmapBusy = false;
+const _beatmapQueue = [];
+function _drainBeatmap() {
+  if (_beatmapBusy) return;
+  const next = _beatmapQueue.shift();
+  if (!next) return;
+  _beatmapBusy = true;
+  buildBeatmap(next.videoId, next.job)
+    .then(next.resolve, next.reject)
+    .finally(() => { _beatmapBusy = false; setImmediate(_drainBeatmap); });
+}
+function runBeatmapSerialized(videoId, job) {
+  return new Promise((resolve, reject) => {
+    _beatmapQueue.push({ videoId, job, resolve, reject });
+    _drainBeatmap();
+  });
+}
 
 async function getCachedBeatmap(videoId) {
   try {
@@ -3050,7 +3080,7 @@ app.get('/api/uniko/beatmap/:videoId', async (req, res) => {
     job = { status: 'analyzing', progress: 5 };
     beatmapJobs.set(videoId, job);
     console.log(`🎼 Analisando ritmo: ${videoId}`);
-    buildBeatmap(videoId, job).then(async (result) => {
+    runBeatmapSerialized(videoId, job).then(async (result) => {
       job.result = result; job.status = 'ready'; job.progress = 100;
       await saveBeatmap(videoId, result);
       console.log(`✓ beatmap ${videoId}: ${result.beats.length} batidas (${result.source})`);
