@@ -3,6 +3,11 @@
 // Spotify + Auth + Alexa TTS + Lembretes programados
 // ════════════════════════════════════════════════════════
 
+// Força IPv4: a rota IPv6 pra Amazon falha/dá timeout no refresh do token (igual
+// ao setup-alexa.js). Sem isso o refreshCookie automático morre no servidor e o
+// registration data "expira" todo dia, exigindo regeneração manual.
+require('dns').setDefaultResultOrder('ipv4first');
+
 const { spawn, exec: execCP } = require('child_process');
 const path     = require('path');
 const fs       = require('fs');
@@ -110,6 +115,21 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
+// Carrega cookies do YouTube persistidos no Supabase (key 'yt_cookies').
+// O PC com a extensão Cat-Bot envia os cookies via /api/ytdl/set-cookies, que os
+// salva no Supabase. Assim o servidor RECUPERA os cookies após restart e QUALQUER
+// dispositivo (inclusive celular SEM a extensão) usa os mesmos cookies do PC.
+(async function loadCookiesFromSupabase() {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'yt_cookies').single();
+    if (data && typeof data.value === 'string' && data.value.length > 20) {
+      fs.writeFileSync(YTCOOKIES_FILE, data.value, 'utf8');
+      ytCookiesOk = true;
+      console.log('🍪 Cookies do YouTube carregados do Supabase (enviados pelo PC).');
+    }
+  } catch (e) { /* ainda não há cookies salvos — segue com env var, se houver */ }
+})();
+
 // ─── Auth config ─────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'crescent_secret';
 
@@ -197,6 +217,13 @@ async function initAlexa() {
 
   const config = {
     alexaServiceHost: 'alexa.amazon.com.br',
+    // Conta brasileira: fixar amazon.com.br/pt-BR no refresh evita o bloqueio de
+    // "atividade incomum" que ocorre ao renovar via www.amazon.com (EUA).
+    // baseAmazonPage controla o domínio de troca de token (api.amazon.com.br);
+    // sem ele o refresh tenta renovar via api.amazon.com (EUA) e falha.
+    amazonPage:       'amazon.com.br',
+    baseAmazonPage:   'amazon.com.br',
+    acceptLanguage:   'pt-BR',
     listeningPort:    0,
     useWsMqtt:        false,
     logger:           false,
@@ -2641,7 +2668,7 @@ app.get('/api/ytdl/status/:videoId', (req, res) => {
 });
 
 // Recebe cookies do YouTube enviados pelo Catbot (extensão Chrome)
-app.post('/api/ytdl/set-cookies', (req, res) => {
+app.post('/api/ytdl/set-cookies', async (req, res) => {
   const auth = req.headers['authorization'];
   if (auth !== 'Bearer uniko-ytcookies') return res.status(401).json({ error: 'não autorizado' });
   const { cookies } = req.body;
@@ -2650,7 +2677,11 @@ app.post('/api/ytdl/set-cookies', (req, res) => {
   try {
     fs.writeFileSync(YTCOOKIES_FILE, cookies, 'utf8');
     ytCookiesOk = true;
-    console.log(`🍪 Cookies do YouTube atualizados via Catbot (${cookies.split('\n').length} linhas).`);
+    // Persiste no Supabase → sobrevive a restart e fica disponível para QUALQUER
+    // dispositivo (o celular sem extensão usa os cookies enviados pelo PC).
+    try { await supabase.from('settings').upsert({ key: 'yt_cookies', value: cookies }); }
+    catch (e) { console.warn('⚠️  Falha ao salvar cookies no Supabase:', e.message); }
+    console.log(`🍪 Cookies do YouTube atualizados via Catbot (${cookies.split('\n').length} linhas) + salvos no Supabase.`);
     res.json({ ok: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
