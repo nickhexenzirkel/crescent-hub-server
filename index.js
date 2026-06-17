@@ -2917,9 +2917,13 @@ async function acquireMediaFile(videoId, job) {
   try { const { path: p } = await downloadVideoWithYtDlp(videoId); return { path: p, source: 'yt-dlp' }; }
   catch (e) { console.warn(`🎵 yt-dlp vídeo falhou [${videoId}]: ${e.message}`); }
   if (job) job.progress = 50;
-  // 4. playwright (último recurso)
-  const { path: p } = await downloadVideoWithPlaywright(videoId);
-  return { path: p, source: 'playwright' };
+  // 4. Playwright/Chromium DESLIGADO no plano free do Render (512MB): abrir o
+  //    Chromium estoura a memória e derruba o servidor. Sem áudio via yt-dlp, a
+  //    análise real fica indisponível e o cliente cai no ritmo ESTIMADO (sem crash).
+  //    (Para reativar, suba o plano do Render e descomente abaixo.)
+  // const { path: p } = await downloadVideoWithPlaywright(videoId);
+  // return { path: p, source: 'playwright' };
+  throw new Error('análise real indisponível (yt-dlp falhou; Chromium desligado p/ economizar memória)');
 }
 
 // Decodifica qualquer mídia para PCM mono Float32 via ffmpeg
