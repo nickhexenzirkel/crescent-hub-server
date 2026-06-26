@@ -734,11 +734,35 @@ OUTROS:
 - NOTIFICAÇÕES: avisos do RH chegam em tempo real (os urgentes aparecem em tela cheia e exigem confirmação); há notificação no desktop via a extensão Cat-Bot/UNIKO.
 - FOTO DE PERFIL: troca no Portal do Colaborador, aba Início — clica na própria foto/avatar pra abrir o editor (botão "Trocar imagem", com ajuste de recorte) e salva. Também dá pra usar um skin do mascote Dodoco como foto na aba My Uniko ("Usar como foto").`;
 
+// Normaliza a pergunta pra virar CHAVE de cache (minúsculas, sem acento/pontuação, espaços colapsados).
+function unikoQKey(s) {
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+    .replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+// Não cacheia respostas vazias ou "não sei" (pra não congelar um não-resposta no FAQ/cache).
+function unikoDontKnow(a) {
+  const t = (a || '').toLowerCase();
+  return !t || t.includes('não sei') || t.includes('nao sei') || t.includes('não tenho certeza') || t.includes('nao tenho certeza');
+}
+
 app.post('/api/uniko/ask', async (req, res) => {
   try {
     const question = String(req.body?.question || '').trim().slice(0, 500);
     if (!question) return res.json({ answer: '' });
     if (!UNIKO_AI_KEY) return res.json({ answer: '' }); // sem chave → cliente usa a FAQ
+    const qkey = unikoQKey(question);
+
+    // 1) CACHE: já respondemos essa pergunta antes? Devolve direto, SEM gastar requisição no Groq.
+    try {
+      const { data: hit } = await supabase.from('uniko_qa_cache').select('answer,hits').eq('qkey', qkey).maybeSingle();
+      if (hit?.answer) {
+        supabase.from('uniko_qa_cache').update({ hits: (hit.hits || 1) + 1, last_asked: new Date().toISOString() }).eq('qkey', qkey).then(() => {}, () => {});
+        return res.json({ answer: hit.answer, cached: true });
+      }
+    } catch {}
+
+    // 2) Não tem no cache → chama a IA (Groq)
     const r = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
       model: UNIKO_AI_MODEL,
       messages: [
@@ -752,6 +776,14 @@ app.post('/api/uniko/ask', async (req, res) => {
       timeout: 20000,
     });
     const answer = (r.data?.choices?.[0]?.message?.content || '').trim();
+
+    // 3) Guarda pergunta+resposta (se for resposta de verdade) → vira cache (não repete requisição)
+    //    e lista pra revisar/promover ao FAQ curado depois (tabela uniko_qa_cache).
+    if (answer && !unikoDontKnow(answer)) {
+      supabase.from('uniko_qa_cache')
+        .upsert({ qkey, question, answer, last_asked: new Date().toISOString() }, { onConflict: 'qkey' })
+        .then(() => {}, () => {});
+    }
     res.json({ answer });
   } catch (e) {
     const ge = e.response?.data?.error;
