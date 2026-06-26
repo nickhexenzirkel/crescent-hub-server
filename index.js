@@ -693,10 +693,10 @@ app.post('/api/notifications', requireAdmin, async (req, res) => {
 });
 
 // ── Assistente UNIKO: responde perguntas sobre o sistema via IA (fallback da FAQ do cliente) ──
-// A chave fica SÓ aqui (env OPENAI_API_KEY). Sem chave/erro → devolve answer vazio e o cliente
-// usa a própria FAQ (não quebra). Modelo barato e respostas curtas pra segurar o custo.
-const UNIKO_AI_KEY   = process.env.OPENAI_API_KEY || '';
-const UNIKO_AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+// A chave fica SÓ aqui (env GEMINI_API_KEY — Google AI Studio, free tier). Sem chave/erro →
+// devolve answer vazio e o cliente usa a própria FAQ (não quebra). Respostas curtas.
+const UNIKO_AI_KEY   = process.env.GEMINI_API_KEY || '';
+const UNIKO_AI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 const UNIKO_SYSTEM = `Você é o UNIKO, o assistente-robô do Uniko HUB (portal interno da empresa, também chamado Crescent Hub).
 REGRAS: responda SEMPRE em português do Brasil, de forma curta e objetiva (1 a 4 frases), amigável e prestativa. Responda APENAS sobre o Uniko HUB e suas funções descritas abaixo. Se a pergunta for sobre outro assunto, ou se você não tiver certeza de um detalhe (um valor exato, uma tela não descrita), seja honesto: diga que não tem certeza e sugira conferir no próprio módulo ou perguntar sobre um dos módulos. NUNCA invente recursos, telas, valores ou regras que não estejam aqui.
 
@@ -739,23 +739,21 @@ app.post('/api/uniko/ask', async (req, res) => {
     const question = String(req.body?.question || '').trim().slice(0, 500);
     if (!question) return res.json({ answer: '' });
     if (!UNIKO_AI_KEY) return res.json({ answer: '' }); // sem chave → cliente usa a FAQ
-    const r = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: UNIKO_AI_MODEL,
-      messages: [
-        { role: 'system', content: UNIKO_SYSTEM },
-        { role: 'user',   content: question },
-      ],
-      max_tokens: 220,
-      temperature: 0.3,
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${UNIKO_AI_MODEL}:generateContent`;
+    const r = await axios.post(url, {
+      system_instruction: { parts: [{ text: UNIKO_SYSTEM }] },
+      contents: [{ role: 'user', parts: [{ text: question }] }],
+      generationConfig: { maxOutputTokens: 220, temperature: 0.3 },
     }, {
-      headers: { Authorization: `Bearer ${UNIKO_AI_KEY}`, 'Content-Type': 'application/json' },
+      // chave no HEADER (fora da URL → não vaza em logs de erro do axios)
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': UNIKO_AI_KEY },
       timeout: 20000,
     });
-    const answer = r.data?.choices?.[0]?.message?.content?.trim() || '';
+    const answer = (r.data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
     res.json({ answer });
   } catch (e) {
-    const oa = e.response?.data?.error;
-    console.warn('⚠️ /api/uniko/ask falhou:', e.response?.status || '', oa?.code || oa?.type || '', oa?.message || e.message);
+    const ge = e.response?.data?.error;
+    console.warn('⚠️ /api/uniko/ask (gemini) falhou:', e.response?.status || '', ge?.status || '', ge?.message || e.message);
     res.json({ answer: '' }); // erro → cliente usa a FAQ (não quebra)
   }
 });
