@@ -731,7 +731,8 @@ OUTROS:
 - GAMES (Portal): jogos arcade com um Ranking Geral que soma os pontos.
 - MY UNIKO: cuidar do mascote Dodoco (fome, energia, sono).
 - LEMBRETES: você cria quando a pessoa pede "me lembre de X às HH:MM"; também há o módulo "Meus Lembretes" pra criar/gerenciar (com repetição diária/semanal/mensal e notas).
-- NOTIFICAÇÕES: avisos do RH chegam em tempo real (os urgentes aparecem em tela cheia e exigem confirmação); há notificação no desktop via a extensão Cat-Bot/UNIKO.`;
+- NOTIFICAÇÕES: avisos do RH chegam em tempo real (os urgentes aparecem em tela cheia e exigem confirmação); há notificação no desktop via a extensão Cat-Bot/UNIKO.
+- FOTO DE PERFIL: troca no Portal do Colaborador, aba Início — clica na própria foto/avatar pra abrir o editor (botão "Trocar imagem", com ajuste de recorte) e salva. Também dá pra usar um skin do mascote Dodoco como foto na aba My Uniko ("Usar como foto").`;
 
 app.post('/api/uniko/ask', async (req, res) => {
   try {
@@ -753,7 +754,8 @@ app.post('/api/uniko/ask', async (req, res) => {
     const answer = r.data?.choices?.[0]?.message?.content?.trim() || '';
     res.json({ answer });
   } catch (e) {
-    console.warn('⚠️ /api/uniko/ask falhou:', e.response?.status || '', e.message);
+    const oa = e.response?.data?.error;
+    console.warn('⚠️ /api/uniko/ask falhou:', e.response?.status || '', oa?.code || oa?.type || '', oa?.message || e.message);
     res.json({ answer: '' }); // erro → cliente usa a FAQ (não quebra)
   }
 });
