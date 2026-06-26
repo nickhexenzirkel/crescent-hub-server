@@ -692,6 +692,55 @@ app.post('/api/notifications', requireAdmin, async (req, res) => {
   res.json({ ok: true, notification: data });
 });
 
+// ── Assistente UNIKO: responde perguntas sobre o sistema via IA (fallback da FAQ do cliente) ──
+// A chave fica SÓ aqui (env OPENAI_API_KEY). Sem chave/erro → devolve answer vazio e o cliente
+// usa a própria FAQ (não quebra). Modelo barato e respostas curtas pra segurar o custo.
+const UNIKO_AI_KEY   = process.env.OPENAI_API_KEY || '';
+const UNIKO_AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const UNIKO_SYSTEM = `Você é o UNIKO, o assistente-robô do Uniko HUB (sistema interno da empresa).
+Responda SEMPRE em português do Brasil, curto (1 a 3 frases), amigável e direto.
+Responda APENAS sobre o Uniko HUB e suas funções. Se a pergunta for fora disso ou você não tiver certeza, diga que não sabe e sugira perguntar sobre os módulos. NUNCA invente recursos que não existem.
+
+MÓDULOS E FUNÇÕES:
+- Portal do Colaborador: tela inicial (início, jogos, eventos, colegas, conquistas, financeiro, lembretes).
+- Prisma Store: loja de recompensas. Duas moedas: Prisma Comum e Prisma Premium. Troca prismas por prêmios reais (PIX, eletrônicos, vouchers). Só admins abrem o módulo, mas todos juntam prismas. Tem check-in, missões, carteira, coleção e histórico.
+- Check-in: ciclo de 7 dias com prismas crescentes que intercalam as moedas; faltou um dia, a sequência volta ao dia 1; tem teto mensal.
+- Missões (dão prismas): Maratona Uniko Wave (jogar 20 min/dia = 100 Prisma Comum; 40 min/dia = 10 Prisma Premium), Voz ativa (dar um feedback no mês = 30 Premium), Presença Impecável (100% de presença sem ocorrências no ponto, no mês = 100 Premium), Top 1/2/3 do mês de quem mais coloca música na Central Alexa, e missões de 1ª e 2ª compra.
+- Uniko Wave: jogo de ritmo (acertar notas no tempo da música). Modo clássico e Guerra Estelar (estilo Muse Dash, com a Mizuki e um boss). Jogar acumula tempo pras missões Maratona. A aba Audição é o gacha (cada desejo custa 100 GW e libera personagens/mascotes, com garantia/pity).
+- Ponto Eletrônico: marcações, banco de horas e justificativas.
+- Central Alexa: toca música no Echo via Spotify, com clipe do YouTube; quem mais coloca música no mês entra no Top do ranking.
+- Dashboard RH (admin): emitir comunicados, avisos (inclusive urgentes), eventos e lembretes.
+- Lembretes: peça ao UNIKO ("me lembre de X às HH:MM") ou use o módulo de Lembretes.
+- Eventos: agenda da empresa (aba Eventos do Portal).
+- Feedback: registrar opinião/sugestão (conta pra missão Voz ativa).
+
+O UNIKO também avisa em tempo real: lembretes, avisos do RH, prismas recebidos de outra pessoa, novos eventos e o progresso das missões.`;
+
+app.post('/api/uniko/ask', async (req, res) => {
+  try {
+    const question = String(req.body?.question || '').trim().slice(0, 500);
+    if (!question) return res.json({ answer: '' });
+    if (!UNIKO_AI_KEY) return res.json({ answer: '' }); // sem chave → cliente usa a FAQ
+    const r = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: UNIKO_AI_MODEL,
+      messages: [
+        { role: 'system', content: UNIKO_SYSTEM },
+        { role: 'user',   content: question },
+      ],
+      max_tokens: 220,
+      temperature: 0.3,
+    }, {
+      headers: { Authorization: `Bearer ${UNIKO_AI_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+    const answer = r.data?.choices?.[0]?.message?.content?.trim() || '';
+    res.json({ answer });
+  } catch (e) {
+    console.warn('⚠️ /api/uniko/ask falhou:', e.response?.status || '', e.message);
+    res.json({ answer: '' }); // erro → cliente usa a FAQ (não quebra)
+  }
+});
+
 // Testar anúncio imediatamente (admin)
 app.post('/api/alexa/speak', requireAdmin, async (req, res) => {
   const { text, sound, device } = req.body;
