@@ -172,24 +172,77 @@ async function saveAlexaReg(reg) {
   }
 }
 
-// Lê o registration data do Supabase; na 1ª vez usa a env var como semente
-// (e já grava no Supabase), para a renovação automática começar a partir dela.
+// Guarda o valor CRU da env var ALEXA_REGISTRATION_DATA que já foi semeado no
+// Supabase da última vez. Serve pra distinguir "a env var não mudou desde o
+// último deploy" (usa o do Supabase, que o alexa-remote2 pode ter auto-renovado
+// e estar mais fresco) de "você colou um token novo no Render" (usa o novo,
+// mesmo que o do Supabase pareça mais recente — foi uma correção manual).
+// Sem isso, colar um token novo em ALEXA_REGISTRATION_DATA não tinha efeito
+// NENHUM depois do 1º setup: o código sempre preferia o que já tava no Supabase.
+const ALEXA_ENV_SEED_KEY = 'alexa_registration_data_env_seed';
+
 async function loadAlexaReg() {
+  const envRaw = process.env.ALEXA_REGISTRATION_DATA || null;
+
+  let stored = null;
   try {
     const { data } = await supabase
       .from('settings').select('value').eq('key', 'alexa_registration_data').maybeSingle();
-    if (data?.value) {
-      console.log('🔑 Alexa: registration data carregado do Supabase.');
-      return JSON.parse(data.value);
-    }
+    if (data?.value) stored = data.value;
   } catch (e) {
     console.error('⚠️  loadAlexaReg:', e.message);
   }
-  if (process.env.ALEXA_REGISTRATION_DATA) {
+
+  let seededFrom = null;
+  try {
+    const { data } = await supabase
+      .from('settings').select('value').eq('key', ALEXA_ENV_SEED_KEY).maybeSingle();
+    if (data?.value) seededFrom = data.value;
+  } catch { /* trata como nunca semeado */ }
+
+  // Migração: já existe reg salvo no Supabase mas ainda não existe o marcador
+  // (1ª execução deste código novo) — assume a env var atual como "já
+  // conhecida" pra não sobrescrever um token auto-renovado bom por engano.
+  if (stored && seededFrom === null && envRaw) {
+    await supabase.from('settings').upsert(
+      { key: ALEXA_ENV_SEED_KEY, value: envRaw }, { onConflict: 'key' }
+    );
+    seededFrom = envRaw;
+  }
+
+  // Env var mudou desde a última leitura → token novo colado à mão. Ganha do
+  // que está no Supabase, mesmo que este pareça "mais recente".
+  if (envRaw && envRaw !== seededFrom) {
     try {
-      const reg = JSON.parse(process.env.ALEXA_REGISTRATION_DATA);
+      const reg = JSON.parse(envRaw);
+      console.log('🔑 Alexa: novo registration data detectado na env var — substituindo o do Supabase.');
+      await saveAlexaReg(reg);
+      await supabase.from('settings').upsert(
+        { key: ALEXA_ENV_SEED_KEY, value: envRaw }, { onConflict: 'key' }
+      );
+      return reg;
+    } catch {
+      console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
+    }
+  }
+
+  if (stored) {
+    try {
+      console.log('🔑 Alexa: registration data carregado do Supabase.');
+      return JSON.parse(stored);
+    } catch (e) {
+      console.error('⚠️  loadAlexaReg: valor salvo no Supabase inválido:', e.message);
+    }
+  }
+
+  if (envRaw) {
+    try {
+      const reg = JSON.parse(envRaw);
       console.log('🔑 Alexa: semeando registration data da env var no Supabase.');
       await saveAlexaReg(reg);
+      await supabase.from('settings').upsert(
+        { key: ALEXA_ENV_SEED_KEY, value: envRaw }, { onConflict: 'key' }
+      );
       return reg;
     } catch {
       console.error('❌ ALEXA_REGISTRATION_DATA inválido — verifique o JSON');
