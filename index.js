@@ -232,21 +232,27 @@ async function initAlexa() {
     cookieRefreshInterval: 4 * 24 * 60 * 60 * 1000,
   };
 
+  // AMAZON_EMAIL/PASSWORD sempre entram na config (mesmo quando já existe `reg`).
+  // Antes só eram usadas se NÃO houvesse reg — ou seja, nunca, depois do 1º setup.
+  // Assim, se a renovação do token salvo falhar (o alexa-remote2 esgota o
+  // formerRegistrationData e cai no login), ele tenta logar sozinho com email/senha
+  // ANTES de exigir o fluxo manual do navegador (setup-alexa.js).
+  if (hasCredentials) {
+    config.email    = process.env.AMAZON_EMAIL;
+    config.password = process.env.AMAZON_PASSWORD;
+  }
   if (reg) {
     config.formerRegistrationData = reg;
     if (reg.macDms)      config.macDms     = reg.macDms;
     if (reg.amazonPage)  config.amazonPage = reg.amazonPage;
     if (reg.localCookie) config.cookie     = reg.localCookie;
-  } else {
-    config.email    = process.env.AMAZON_EMAIL;
-    config.password = process.env.AMAZON_PASSWORD;
   }
 
   alexa.init(config, (err) => {
     if (err) {
       // Ignora erro de login por browser (registration data expirada) — não polui logs
       if (err.message?.includes('open http')) {
-        console.warn('⚠️  Alexa: registration data expirada. Regere o token (setup-alexa.js) e atualize no Render.');
+        console.warn(`⚠️  Alexa: registration data expirada e login automático (email/senha) também falhou. Regere o token (setup-alexa.js) e atualize no Render. Detalhe: ${err.message}`);
       } else {
         console.error('❌ Alexa init:', err.message);
       }
