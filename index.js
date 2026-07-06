@@ -370,7 +370,12 @@ async function checkCaptureUnikoSpawn() {
 
     const msg = cfg.alexaMessage || DEFAULT_CAPTURE_ALEXA_MSG;
     try {
-      await speakOnAlexa(msg, { sound: 'notificacao' });
+      // Sem tag de som (opts.sound) de propósito: essa <audio src="soundbank://...">
+      // via SSML nunca foi testada de verdade em produção (o form de lembretes
+      // descarta o campo `sound` antes de salvar) e é a suspeita mais forte pro
+      // "estou com problemas para acessar sua skill" que a Alexa fala — SSML com
+      // tag de áudio não suportada nesse tipo de comando derruba o anúncio inteiro.
+      await speakOnAlexa(msg);
       console.log('🎉 Capture o Uniko: anúncio disparado na Alexa.');
     } catch (e) {
       console.warn('⚠️  Capture o Uniko: falha ao anunciar na Alexa:', e.message);
