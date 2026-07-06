@@ -341,6 +341,53 @@ async function speakOnAlexa(text, opts = {}) {
   });
 }
 
+// ── Capture o Uniko: avisa no Echo quando um Uniko SPAWNA no Portal ──
+// A config (settings.capture_uniko_config) é escrita só pelo Dashboard RH
+// (evento/spawn); aqui só LEMOS pra saber a hora certa de falar. Poll a cada
+// 5s (não dá pra usar o cron de 1min — o "Spawnar agora" marca spawnAt pra
+// só +6s no futuro). Dedup via `alexaAnnouncedFor` gravado de volta na própria
+// config (sobrevive a restart do Render) + guarda em memória (evita corrida
+// entre dois polls antes do upsert de dedup confirmar).
+const CAPTURE_CONFIG_KEY = 'capture_uniko_config';
+const DEFAULT_CAPTURE_ALEXA_MSG = 'Atenção a todos, verifiquem o portal do colaborador! Tem uma surpresa por lá.';
+let lastCaptureAnnouncedFor = null;
+
+async function checkCaptureUnikoSpawn() {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', CAPTURE_CONFIG_KEY).maybeSingle();
+    if (!data?.value) return;
+    const cfg = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+    if (!cfg?.enabled || !cfg.spawnAt) return;
+
+    const spawnMs = Date.parse(cfg.spawnAt);
+    const endMs   = cfg.endAt ? Date.parse(cfg.endAt) : NaN;
+    const now     = Date.now();
+    if (Number.isNaN(spawnMs) || now < spawnMs) return;             // ainda não chegou a hora
+    if (!Number.isNaN(endMs) && now > endMs) return;                 // janela já fechou (evento velho)
+    if (cfg.alexaAnnouncedFor === cfg.spawnAt) return;                // já avisou desse spawn (persistido)
+    if (lastCaptureAnnouncedFor === cfg.spawnAt) return;              // já avisou desse spawn (nesse boot)
+    lastCaptureAnnouncedFor = cfg.spawnAt;
+
+    const msg = cfg.alexaMessage || DEFAULT_CAPTURE_ALEXA_MSG;
+    try {
+      await speakOnAlexa(msg, { sound: 'notificacao' });
+      console.log('🎉 Capture o Uniko: anúncio disparado na Alexa.');
+    } catch (e) {
+      console.warn('⚠️  Capture o Uniko: falha ao anunciar na Alexa:', e.message);
+    }
+    // Marca como avisado mesmo se a fala falhou (ex.: Alexa offline) — não fica
+    // tentando de novo pro mesmo spawn a cada 5s; um "Spawnar agora" novo já
+    // gera um spawnAt diferente e libera um novo aviso.
+    await supabase.from('settings').upsert(
+      { key: CAPTURE_CONFIG_KEY, value: JSON.stringify({ ...cfg, alexaAnnouncedFor: cfg.spawnAt }) },
+      { onConflict: 'key' }
+    );
+  } catch (e) {
+    console.error('⚠️  checkCaptureUnikoSpawn:', e.message);
+  }
+}
+setInterval(checkCaptureUnikoSpawn, 5000);
+
 // ── Cron: verifica lembretes a cada minuto (horário de Brasília) ──
 // Deduplicação via Set em memória — evita depender de last_triggered no banco.
 const firedReminders = new Set();
