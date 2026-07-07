@@ -973,7 +973,7 @@ app.post('/api/alexa/speak', requireAdmin, async (req, res) => {
   const { text, sound, device } = req.body;
   if (!text) return res.status(400).json({ error: 'Texto obrigatório' });
   try {
-    await speakOnAlexa(text, { sound, device });
+    await speakOnAlexa(text, { sound, device, boostVolume: true });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
