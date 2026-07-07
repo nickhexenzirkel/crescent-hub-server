@@ -326,20 +326,32 @@ async function initAlexa() {
 }
 initAlexa();
 
-// Lê o volume atual do Spotify Connect no Echo (é o volume real do dispositivo
-// quando a música toca via Connect — não existe volume "só da Alexa" separado
-// nesse fluxo). Usado pra saber quanto subir e pra onde voltar depois.
-async function getSpotifyVolume() {
-  try {
-    const r = await spotify('get', '/me/player');
-    const v = r?.data?.device?.volume_percent;
-    return typeof v === 'number' ? v : null;
-  } catch { return null; }
+// Lê/ajusta o volume NATIVO do dispositivo Echo (Alexa.DeviceControls.Volume) —
+// não o volume do Spotify Connect. Testado e confirmado: subir o volume via
+// Spotify não muda o volume de verdade da fala da Alexa (ela fala no volume do
+// APARELHO, que é um controle separado). getAllDeviceVolumes/sendSequenceCommand
+// 'volume' são os mesmos usados pelo comando de voz "Alexa, volume 8".
+function getAlexaDeviceVolume(serial) {
+  return new Promise((resolve) => {
+    if (!alexa || !alexaOk) return resolve(null);
+    alexa.getAllDeviceVolumes((err, data) => {
+      if (err) { console.warn('⚠️  getAllDeviceVolumes:', err.message); return resolve(null); }
+      const list = Array.isArray(data) ? data : (data?.volumes || data?.deviceVolumes || []);
+      const entry = (list || []).find(d => d.deviceSerialNumber === serial || d.serialNumber === serial || d.dsn === serial);
+      const v = entry?.speakerVolume ?? entry?.volume ?? entry?.volumeSetting;
+      resolve(typeof v === 'number' ? v : null);
+    });
+  });
 }
-async function setSpotifyVolume(pct) {
+function setAlexaDeviceVolume(serial, pct) {
   const v = Math.max(0, Math.min(100, Math.round(pct)));
-  try { await spotify('put', `/me/player/volume?volume_percent=${v}`); }
-  catch (e) { console.warn('⚠️  setSpotifyVolume:', e.response?.data?.error?.message || e.message); }
+  return new Promise((resolve) => {
+    if (!alexa || !alexaOk) return resolve();
+    alexa.sendSequenceCommand(serial, 'volume', v, (err) => {
+      if (err) console.warn('⚠️  setAlexaDeviceVolume:', err.message);
+      resolve();
+    });
+  });
 }
 // Estima quanto tempo a fala vai durar (~2.5 palavras/seg, fala natural) + folga,
 // pra saber quando é seguro voltar ao volume original (a Alexa não avisa quando
@@ -356,16 +368,20 @@ async function speakOnAlexa(text, opts = {}) {
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) throw new Error('Nenhum dispositivo Echo encontrado. Configure ALEXA_DEVICE_SERIAL no Render.');
 
-  // Sobe o volume temporariamente pra garantir que o lembrete seja ouvido bem
-  // alto por cima da música (se estiver tocando) — e agenda a volta pro volume
-  // de antes depois do tempo estimado de fala.
+  // Sobe o volume NATIVO do Echo (não o do Spotify Connect — testado e
+  // confirmado que aquele não afeta o volume real da fala) temporariamente,
+  // pra garantir que o lembrete seja ouvido bem alto por cima da música (se
+  // estiver tocando) — e agenda a volta pro volume de antes depois do tempo
+  // estimado de fala.
   let originalVolume = null;
   if (opts.boostVolume) {
-    originalVolume = await getSpotifyVolume();
+    originalVolume = await getAlexaDeviceVolume(serial);
     if (originalVolume != null) {
       const boosted = Math.min(100, Math.max(originalVolume + 30, Math.round(originalVolume * 1.7)));
-      await setSpotifyVolume(boosted);
+      await setAlexaDeviceVolume(serial, boosted);
       await new Promise(r => setTimeout(r, 600)); // dá tempo do volume aplicar antes de falar
+    } else {
+      console.warn('⚠️  boostVolume: não consegui ler o volume atual do Echo — lembrete vai falar no volume normal.');
     }
   }
 
@@ -379,7 +395,7 @@ async function speakOnAlexa(text, opts = {}) {
 
   if (originalVolume != null) {
     const waitMs = estimateSpeechMs(text);
-    setTimeout(() => { setSpotifyVolume(originalVolume); }, waitMs);
+    setTimeout(() => { setAlexaDeviceVolume(serial, originalVolume); }, waitMs);
   }
 }
 
