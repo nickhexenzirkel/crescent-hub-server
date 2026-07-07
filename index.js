@@ -328,7 +328,7 @@ initAlexa();
 
 // Volume fixo (0-100) pro anúncio, configurado aqui no código — alto o
 // suficiente pra ouvir bem mesmo com o volume de música baixo.
-const ALEXA_ANNOUNCE_VOLUME = 65;
+const ALEXA_ANNOUNCE_VOLUME = 50;
 
 // Estima quanto tempo a fala vai durar (~2.5 palavras/seg, fala natural) + folga,
 // pra saber quando é seguro descer o volume/retomar a música (a Alexa não avisa
