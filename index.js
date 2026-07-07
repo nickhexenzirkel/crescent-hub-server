@@ -326,19 +326,61 @@ async function initAlexa() {
 }
 initAlexa();
 
+// Lê o volume atual do Spotify Connect no Echo (é o volume real do dispositivo
+// quando a música toca via Connect — não existe volume "só da Alexa" separado
+// nesse fluxo). Usado pra saber quanto subir e pra onde voltar depois.
+async function getSpotifyVolume() {
+  try {
+    const r = await spotify('get', '/me/player');
+    const v = r?.data?.device?.volume_percent;
+    return typeof v === 'number' ? v : null;
+  } catch { return null; }
+}
+async function setSpotifyVolume(pct) {
+  const v = Math.max(0, Math.min(100, Math.round(pct)));
+  try { await spotify('put', `/me/player/volume?volume_percent=${v}`); }
+  catch (e) { console.warn('⚠️  setSpotifyVolume:', e.response?.data?.error?.message || e.message); }
+}
+// Estima quanto tempo a fala vai durar (~2.5 palavras/seg, fala natural) + folga,
+// pra saber quando é seguro voltar ao volume original (a Alexa não avisa quando
+// termina de falar — só quando ACEITA o comando).
+function estimateSpeechMs(text) {
+  const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(2000, Math.round((words / 2.5) * 1000) + 1800);
+}
+
 async function speakOnAlexa(text, opts = {}) {
   if (!alexa || !alexaOk) throw new Error('Alexa não inicializada. Configure AMAZON_EMAIL e AMAZON_PASSWORD no Render.');
   const serial = opts.device
     || process.env.ALEXA_DEVICE_SERIAL
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) throw new Error('Nenhum dispositivo Echo encontrado. Configure ALEXA_DEVICE_SERIAL no Render.');
+
+  // Sobe o volume temporariamente pra garantir que o lembrete seja ouvido bem
+  // alto por cima da música (se estiver tocando) — e agenda a volta pro volume
+  // de antes depois do tempo estimado de fala.
+  let originalVolume = null;
+  if (opts.boostVolume) {
+    originalVolume = await getSpotifyVolume();
+    if (originalVolume != null) {
+      const boosted = Math.min(100, Math.max(originalVolume + 15, Math.round(originalVolume * 1.35)));
+      await setSpotifyVolume(boosted);
+      await new Promise(r => setTimeout(r, 600)); // dá tempo do volume aplicar antes de falar
+    }
+  }
+
   const soundTag = opts.sound && SOUNDS[opts.sound] ? `<audio src="${SOUNDS[opts.sound]}"/><break time="800ms"/>` : '';
   const ssml = `<speak>${soundTag}${text}</speak>`;
-  return new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     alexa.sendSequenceCommand(serial, 'speak', ssml, (err) => {
       if (err) reject(err); else resolve();
     });
   });
+
+  if (originalVolume != null) {
+    const waitMs = estimateSpeechMs(text);
+    setTimeout(() => { setSpotifyVolume(originalVolume); }, waitMs);
+  }
 }
 
 // ── Capture o Uniko: avisa no Echo quando um Uniko SPAWNA no Portal ──
@@ -432,7 +474,9 @@ cron.schedule('* * * * *', async () => {
 
       try {
         if (r.type === 'alexa') {
-          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device });
+          // boostVolume: sobe o volume por cima da música (se estiver tocando) pra
+          // garantir que o lembrete seja ouvido bem alto, e volta sozinho depois.
+          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device, boostVolume: true });
           console.log(`✅ Alexa anunciou: "${r.title}"`);
         } else if (r.type === 'personal') {
           // Lembrete pessoal: o cliente de cada usuário gerencia localmente.
