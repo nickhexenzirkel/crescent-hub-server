@@ -326,14 +326,46 @@ async function initAlexa() {
 }
 initAlexa();
 
+// Volume fixo (0-100) pro anúncio, configurado aqui no código — alto o
+// suficiente pra ouvir bem mesmo com o volume de música baixo.
+const ALEXA_ANNOUNCE_VOLUME = 65;
+
 // Estima quanto tempo a fala vai durar (~2.5 palavras/seg, fala natural) + folga,
-// pra saber quando é seguro retomar a música (a Alexa não avisa quando termina
-// de falar — só quando ACEITA o comando).
+// pra saber quando é seguro descer o volume/retomar a música (a Alexa não avisa
+// quando termina de falar — só quando ACEITA o comando).
 function estimateSpeechMs(text) {
   const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
   return Math.max(2000, Math.round((words / 2.5) * 1000) + 1800);
 }
 
+function getAlexaDeviceVolume(serial) {
+  return new Promise((resolve) => {
+    if (!alexa || !alexaOk) return resolve(null);
+    alexa.getAllDeviceVolumes((err, data) => {
+      if (err) { console.warn('⚠️  getAllDeviceVolumes erro:', err.message); return resolve(null); }
+      const list = Array.isArray(data) ? data : (data?.volumes || data?.deviceVolumes || []);
+      const entry = (list || []).find(d => d.deviceSerialNumber === serial || d.serialNumber === serial || d.dsn === serial);
+      const v = entry?.speakerVolume ?? entry?.volume ?? entry?.volumeSetting;
+      resolve(typeof v === 'number' ? v : null);
+    });
+  });
+}
+function setAlexaDeviceVolume(serial, pct) {
+  const v = Math.max(0, Math.min(100, Math.round(pct)));
+  return new Promise((resolve) => {
+    if (!alexa || !alexaOk) return resolve();
+    alexa.sendSequenceCommand(serial, 'volume', v, (err) => {
+      if (err) console.warn('⚠️  setAlexaDeviceVolume erro:', err.message);
+      resolve();
+    });
+  });
+}
+
+// Regra do anúncio (lembrete/aviso falado): 1) pausa a música (se tiver
+// tocando); 2) sobe o volume nativo do Echo pro ALEXA_ANNOUNCE_VOLUME fixo;
+// 3) fala; 4) depois que a fala termina (estimado), desce o volume de volta
+// pro que estava antes; 5) retoma a música. Tudo dentro de try/catch pra
+// nunca travar o anúncio em si por causa de pausar/ajustar volume.
 async function speakOnAlexa(text, opts = {}) {
   if (!alexa || !alexaOk) throw new Error('Alexa não inicializada. Configure AMAZON_EMAIL e AMAZON_PASSWORD no Render.');
   const serial = opts.device
@@ -341,23 +373,20 @@ async function speakOnAlexa(text, opts = {}) {
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) throw new Error('Nenhum dispositivo Echo encontrado. Configure ALEXA_DEVICE_SERIAL no Render.');
 
-  // Pausa a música (se tiver tocando) antes de falar, e retoma depois — tentamos
-  // primeiro subir o volume nativo do Echo, mas isso demorava (2 chamadas extra
-  // pra API da Alexa antes de falar) e às vezes não restaurava o volume original
-  // depois. Pausar/retomar é bem mais rápido e simples: sem música tocando junto,
-  // não precisa de volume mais alto pra ouvir bem, e não tem nada pra "esquecer"
-  // de desfazer. Mesmo padrão já usado no textCommand da Alexa (pergunta por voz).
   let wasPlaying = false;
+  let originalVolume = null;
   if (opts.pauseMusic) {
     try {
       const playerCheck = await spotify('get', '/me/player/currently-playing').catch(() => null);
-      if (playerCheck?.data?.is_playing) {
-        wasPlaying = true;
-        await spotify('put', '/me/player/pause').catch(() => {});
-        await new Promise(r => setTimeout(r, 500));
-      }
+      wasPlaying = !!playerCheck?.data?.is_playing;
+      const pausePromise = wasPlaying ? spotify('put', '/me/player/pause').catch(() => {}) : Promise.resolve();
+      const volumePromise = getAlexaDeviceVolume(serial).then(async (v) => {
+        originalVolume = v;
+        if (v != null) await setAlexaDeviceVolume(serial, ALEXA_ANNOUNCE_VOLUME);
+      });
+      await Promise.all([pausePromise, volumePromise]);
     } catch (e) {
-      console.warn('⚠️  pauseMusic falhou, seguindo sem pausar a música:', e.message);
+      console.warn('⚠️  pauseMusic falhou, seguindo sem pausar/ajustar volume:', e.message);
     }
   }
 
@@ -369,10 +398,11 @@ async function speakOnAlexa(text, opts = {}) {
     });
   });
 
-  if (wasPlaying) {
+  if (wasPlaying || originalVolume != null) {
     const waitMs = estimateSpeechMs(text);
-    setTimeout(() => {
-      spotify('put', '/me/player/play').catch(e => console.warn('⚠️  retomar música falhou:', e.message));
+    setTimeout(async () => {
+      if (originalVolume != null) await setAlexaDeviceVolume(serial, originalVolume).catch(e => console.warn('⚠️  restaurar volume falhou:', e.message));
+      if (wasPlaying) await spotify('put', '/me/player/play').catch(e => console.warn('⚠️  retomar música falhou:', e.message));
     }, waitMs);
   }
 }
