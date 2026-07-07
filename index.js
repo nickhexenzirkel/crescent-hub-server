@@ -363,7 +363,7 @@ async function speakOnAlexa(text, opts = {}) {
   if (opts.boostVolume) {
     originalVolume = await getSpotifyVolume();
     if (originalVolume != null) {
-      const boosted = Math.min(100, Math.max(originalVolume + 15, Math.round(originalVolume * 1.35)));
+      const boosted = Math.min(100, Math.max(originalVolume + 30, Math.round(originalVolume * 1.7)));
       await setSpotifyVolume(boosted);
       await new Promise(r => setTimeout(r, 600)); // dá tempo do volume aplicar antes de falar
     }
