@@ -2251,11 +2251,17 @@ async function monitorPlayback() {
         // Por isso combinamos 3 sinais para detectar fim natural:
         // 1. remaining atual ≤ 3s (progress chegou ao fim)
         // 2. lastProgressMs estava ≤ 8s do fim no último tick playing
-        // 3. nearEndTriggered foi setado (estava ≤ 8s do fim)
+        // 3. nearEndTriggered foi setado E o remaining atual TAMBÉM está perto do fim
+        //    (nearEndTriggered sozinho não basta — é uma flag "ficou true e some depois
+        //    de 15s", então uma pausa passageira minutos antes do fim real (blip de
+        //    rede/handoff de dispositivo) caía aqui e cortava a música no meio; visto
+        //    ao vivo num log real: remaining=156186ms com nearEndTriggered=true avançou
+        //    a fila mesmo faltando 2min36s de música).
         const remainingAtLastPoll = item.duration_ms - lastProgressMs;
+        const nearEndNow          = remaining <= 12000;
         const songEndedNaturally  = remaining <= 3000
                                  || (lastProgressMs > 0 && remainingAtLastPoll <= 8000)
-                                 || nearEndTriggered;
+                                 || (nearEndTriggered && nearEndNow);
 
         if (songEndedNaturally) {
           console.log(`🎵 Música terminou (remaining=${remaining}ms, lastPoll=${remainingAtLastPoll}ms, nearEnd=${nearEndTriggered}) — avançando fila...`);
