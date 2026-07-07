@@ -442,7 +442,7 @@ async function checkCaptureUnikoSpawn() {
       // descarta o campo `sound` antes de salvar) e é a suspeita mais forte pro
       // "estou com problemas para acessar sua skill" que a Alexa fala — SSML com
       // tag de áudio não suportada nesse tipo de comando derruba o anúncio inteiro.
-      await speakOnAlexa(msg);
+      await speakOnAlexa(msg, { boostVolume: true });
       console.log('🎉 Capture o Uniko: anúncio disparado na Alexa.');
     } catch (e) {
       console.warn('⚠️  Capture o Uniko: falha ao anunciar na Alexa:', e.message);
@@ -850,6 +850,29 @@ loadSpotifyCredentials();
 
 app.get('/api/alexa/status', (req, res) => {
   res.json({ ok: alexaOk, configured: !!(process.env.AMAZON_EMAIL && process.env.AMAZON_PASSWORD) });
+});
+
+// Atualiza o registration data (cookies) da Alexa colado pelo admin pelo Dashboard
+// RH — evita precisar entrar no VPS/editar .env toda vez que o token expira.
+// Salva no Supabase e reconecta na hora, sem precisar reiniciar o processo.
+app.post('/api/alexa/update-registration', requireAdmin, async (req, res) => {
+  const { data } = req.body;
+  if (!data) return res.status(400).json({ error: 'Cole o JSON gerado pelo setup-alexa.js' });
+  let reg;
+  try {
+    reg = typeof data === 'string' ? JSON.parse(data) : data;
+  } catch {
+    return res.status(400).json({ error: 'JSON inválido — confira se colou o conteúdo completo' });
+  }
+  try {
+    await saveAlexaReg(reg);
+    alexaOk = false;      // até o reinit confirmar a conexão de novo
+    alexaDevices = [];
+    initAlexa();           // reconecta com o token novo — não precisa reiniciar o processo
+    res.json({ ok: true, msg: 'Cookies salvos! Reconectando com a Alexa...' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/alexa/devices', requireAuth, (req, res) => {
