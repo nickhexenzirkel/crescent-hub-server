@@ -335,10 +335,13 @@ function getAlexaDeviceVolume(serial) {
   return new Promise((resolve) => {
     if (!alexa || !alexaOk) return resolve(null);
     alexa.getAllDeviceVolumes((err, data) => {
-      if (err) { console.warn('⚠️  getAllDeviceVolumes:', err.message); return resolve(null); }
+      if (err) { console.warn('⚠️  getAllDeviceVolumes erro:', err.message); return resolve(null); }
+      // LOG TEMPORÁRIO de diagnóstico — tira depois de confirmar o formato certo.
+      console.log('🔍 getAllDeviceVolumes RAW:', JSON.stringify(data).slice(0, 1000));
       const list = Array.isArray(data) ? data : (data?.volumes || data?.deviceVolumes || []);
       const entry = (list || []).find(d => d.deviceSerialNumber === serial || d.serialNumber === serial || d.dsn === serial);
       const v = entry?.speakerVolume ?? entry?.volume ?? entry?.volumeSetting;
+      console.log(`🔍 getAlexaDeviceVolume(${serial}) → entry=${JSON.stringify(entry)} valor=${v}`);
       resolve(typeof v === 'number' ? v : null);
     });
   });
@@ -347,8 +350,10 @@ function setAlexaDeviceVolume(serial, pct) {
   const v = Math.max(0, Math.min(100, Math.round(pct)));
   return new Promise((resolve) => {
     if (!alexa || !alexaOk) return resolve();
+    console.log(`🔍 setAlexaDeviceVolume(${serial}, ${v}) — enviando...`);
     alexa.sendSequenceCommand(serial, 'volume', v, (err) => {
-      if (err) console.warn('⚠️  setAlexaDeviceVolume:', err.message);
+      if (err) console.warn('⚠️  setAlexaDeviceVolume erro:', err.message);
+      else console.log(`🔍 setAlexaDeviceVolume(${serial}, ${v}) — comando aceito sem erro.`);
       resolve();
     });
   });
