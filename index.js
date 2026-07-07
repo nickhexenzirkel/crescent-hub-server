@@ -326,36 +326,9 @@ async function initAlexa() {
 }
 initAlexa();
 
-// Lê/ajusta o volume NATIVO do dispositivo Echo (Alexa.DeviceControls.Volume) —
-// não o volume do Spotify Connect. Testado e confirmado: subir o volume via
-// Spotify não muda o volume de verdade da fala da Alexa (ela fala no volume do
-// APARELHO, que é um controle separado). getAllDeviceVolumes/sendSequenceCommand
-// 'volume' são os mesmos usados pelo comando de voz "Alexa, volume 8".
-function getAlexaDeviceVolume(serial) {
-  return new Promise((resolve) => {
-    if (!alexa || !alexaOk) return resolve(null);
-    alexa.getAllDeviceVolumes((err, data) => {
-      if (err) { console.warn('⚠️  getAllDeviceVolumes erro:', err.message); return resolve(null); }
-      const list = Array.isArray(data) ? data : (data?.volumes || data?.deviceVolumes || []);
-      const entry = (list || []).find(d => d.deviceSerialNumber === serial || d.serialNumber === serial || d.dsn === serial);
-      const v = entry?.speakerVolume ?? entry?.volume ?? entry?.volumeSetting;
-      resolve(typeof v === 'number' ? v : null);
-    });
-  });
-}
-function setAlexaDeviceVolume(serial, pct) {
-  const v = Math.max(0, Math.min(100, Math.round(pct)));
-  return new Promise((resolve) => {
-    if (!alexa || !alexaOk) return resolve();
-    alexa.sendSequenceCommand(serial, 'volume', v, (err) => {
-      if (err) console.warn('⚠️  setAlexaDeviceVolume erro:', err.message);
-      resolve();
-    });
-  });
-}
 // Estima quanto tempo a fala vai durar (~2.5 palavras/seg, fala natural) + folga,
-// pra saber quando é seguro voltar ao volume original (a Alexa não avisa quando
-// termina de falar — só quando ACEITA o comando).
+// pra saber quando é seguro retomar a música (a Alexa não avisa quando termina
+// de falar — só quando ACEITA o comando).
 function estimateSpeechMs(text) {
   const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
   return Math.max(2000, Math.round((words / 2.5) * 1000) + 1800);
@@ -368,27 +341,23 @@ async function speakOnAlexa(text, opts = {}) {
     || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
   if (!serial) throw new Error('Nenhum dispositivo Echo encontrado. Configure ALEXA_DEVICE_SERIAL no Render.');
 
-  // Sobe o volume NATIVO do Echo (não o do Spotify Connect — testado e
-  // confirmado que aquele não afeta o volume real da fala) temporariamente,
-  // pra garantir que o lembrete seja ouvido bem alto por cima da música (se
-  // estiver tocando) — e agenda a volta pro volume de antes depois do tempo
-  // estimado de fala.
-  // Se QUALQUER coisa der errado aqui (ex.: getAllDeviceVolumes fora do ar),
-  // o lembrete tem que falar mesmo assim — só sem o volume mais alto.
-  let originalVolume = null;
-  if (opts.boostVolume) {
+  // Pausa a música (se tiver tocando) antes de falar, e retoma depois — tentamos
+  // primeiro subir o volume nativo do Echo, mas isso demorava (2 chamadas extra
+  // pra API da Alexa antes de falar) e às vezes não restaurava o volume original
+  // depois. Pausar/retomar é bem mais rápido e simples: sem música tocando junto,
+  // não precisa de volume mais alto pra ouvir bem, e não tem nada pra "esquecer"
+  // de desfazer. Mesmo padrão já usado no textCommand da Alexa (pergunta por voz).
+  let wasPlaying = false;
+  if (opts.pauseMusic) {
     try {
-      originalVolume = await getAlexaDeviceVolume(serial);
-      if (originalVolume != null) {
-        const boosted = Math.min(100, Math.max(originalVolume + 30, Math.round(originalVolume * 1.7)));
-        await setAlexaDeviceVolume(serial, boosted);
-        await new Promise(r => setTimeout(r, 600)); // dá tempo do volume aplicar antes de falar
-      } else {
-        console.warn('⚠️  boostVolume: não consegui ler o volume atual do Echo — lembrete vai falar no volume normal.');
+      const playerCheck = await spotify('get', '/me/player/currently-playing').catch(() => null);
+      if (playerCheck?.data?.is_playing) {
+        wasPlaying = true;
+        await spotify('put', '/me/player/pause').catch(() => {});
+        await new Promise(r => setTimeout(r, 500));
       }
     } catch (e) {
-      console.warn('⚠️  boostVolume falhou, seguindo sem subir o volume:', e.message);
-      originalVolume = null;
+      console.warn('⚠️  pauseMusic falhou, seguindo sem pausar a música:', e.message);
     }
   }
 
@@ -400,10 +369,10 @@ async function speakOnAlexa(text, opts = {}) {
     });
   });
 
-  if (originalVolume != null) {
+  if (wasPlaying) {
     const waitMs = estimateSpeechMs(text);
     setTimeout(() => {
-      setAlexaDeviceVolume(serial, originalVolume).catch(e => console.warn('⚠️  restaurar volume falhou:', e.message));
+      spotify('put', '/me/player/play').catch(e => console.warn('⚠️  retomar música falhou:', e.message));
     }, waitMs);
   }
 }
@@ -442,7 +411,7 @@ async function checkCaptureUnikoSpawn() {
       // descarta o campo `sound` antes de salvar) e é a suspeita mais forte pro
       // "estou com problemas para acessar sua skill" que a Alexa fala — SSML com
       // tag de áudio não suportada nesse tipo de comando derruba o anúncio inteiro.
-      await speakOnAlexa(msg, { boostVolume: true });
+      await speakOnAlexa(msg, { pauseMusic: true });
       console.log('🎉 Capture o Uniko: anúncio disparado na Alexa.');
     } catch (e) {
       console.warn('⚠️  Capture o Uniko: falha ao anunciar na Alexa:', e.message);
@@ -499,9 +468,9 @@ cron.schedule('* * * * *', async () => {
 
       try {
         if (r.type === 'alexa') {
-          // boostVolume: sobe o volume por cima da música (se estiver tocando) pra
-          // garantir que o lembrete seja ouvido bem alto, e volta sozinho depois.
-          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device, boostVolume: true });
+          // pauseMusic: pausa a música (se estiver tocando) pra garantir que o
+          // lembrete seja ouvido bem, e retoma sozinho depois.
+          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device, pauseMusic: true });
           console.log(`✅ Alexa anunciou: "${r.title}"`);
         } else if (r.type === 'personal') {
           // Lembrete pessoal: o cliente de cada usuário gerencia localmente.
@@ -1000,7 +969,7 @@ app.post('/api/alexa/speak', requireAdmin, async (req, res) => {
   const { text, sound, device } = req.body;
   if (!text) return res.status(400).json({ error: 'Texto obrigatório' });
   try {
-    await speakOnAlexa(text, { sound, device, boostVolume: true });
+    await speakOnAlexa(text, { sound, device, pauseMusic: true });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
