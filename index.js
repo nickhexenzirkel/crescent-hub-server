@@ -1498,13 +1498,19 @@ app.post('/api/queue', async (req, res) => {
     const cacheAge           = Date.now() - progressCache.at;
     const spotifyReallyPlaying = progressCache.data?.is_playing === true && cacheAge < 10000;
 
-    if (!realMusicPlaying && !spotifyReallyPlaying) {
+    if (!realMusicPlaying && !spotifyReallyPlaying && !_trackChangeInProgress) {
       // Nada tocando de verdade: inicia a música do usuário imediatamente
       if (playingAutoplay) {
         await supabase.from('queue').update({ status: 'played' }).eq('id', playingAutoplay.id);
       }
       await startPlaying(data);
       console.log(`▶️  Auto-start: "${title}" — ${playingAutoplay ? 'interrompeu autoplay' : 'fila estava vazia'}`);
+    } else if (_trackChangeInProgress) {
+      // Uma troca de faixa legítima está rolando NESSE EXATO INSTANTE (advanceQueue/
+      // startAutoPlaylist já escolheram a próxima e estão no meio do processo) —
+      // player_state/progressCache ainda não refletem isso, mas NÃO é fila vazia.
+      // Música entra na fila normal, sem roubar o play da que já foi escolhida.
+      console.log(`🎵 Troca de faixa em andamento — "${title}" adicionada à fila`);
     } else if (!realMusicPlaying && spotifyReallyPlaying) {
       // Spotify tocando (autoplay ou transição recente) — música vai para a fila normalmente
       console.log(`🎵 Spotify tocando — "${title}" adicionada à fila`);
@@ -2047,7 +2053,27 @@ async function wakeSpotifyViaAlexa(song) {
   return null;
 }
 
+// true durante TODA a troca de faixa (do início de startPlaying até o player_state
+// ser atualizado no fim) — cobre o gap de 800ms+ (transferência de device + chamadas
+// à API do Spotify) em que `player_state`/`progressCache` ainda apontam pra faixa
+// VELHA mesmo com uma troca legítima em andamento. Sem isso, o endpoint de
+// adicionar música (ver "Gerenciamento de autoplay vs fila real") podia achar que
+// "nada estava tocando" nesse gap e roubar o play imediatamente com a música recém-
+// adicionada, pulando a próxima da fila que já tinha sido escolhida por advanceQueue
+// (bug real observado: "Love In The Dark" começou a tocar e, ~1s depois, foi
+// substituída por "Into You" que alguém acabou de adicionar bem nesse instante).
+let _trackChangeInProgress = false;
+
 async function startPlaying(song) {
+  _trackChangeInProgress = true;
+  try {
+    await _startPlayingInner(song);
+  } finally {
+    _trackChangeInProgress = false;
+  }
+}
+
+async function _startPlayingInner(song) {
   // Marca música atual como tocada
   await supabase.from('queue').update({ status: 'played' }).eq('status', 'playing');
 
