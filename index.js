@@ -305,7 +305,7 @@ async function initAlexa() {
     if (err) {
       // Ignora erro de login por browser (registration data expirada) — não polui logs
       if (err.message?.includes('open http')) {
-        console.warn(`⚠️  Alexa: registration data expirada e login automático (email/senha) também falhou. Regere o token (setup-alexa.js) e atualize no Render. Detalhe: ${err.message}`);
+        console.warn(`⚠️  Alexa: registration data expirada e login automático (email/senha) também falhou. Regere o token (setup-alexa.js) e atualize a env var ALEXA_REGISTRATION_DATA no servidor. Detalhe: ${err.message}`);
       } else {
         console.error('❌ Alexa init:', err.message);
       }
