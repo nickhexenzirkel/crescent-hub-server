@@ -1268,9 +1268,62 @@ app.get('/api/status', async (req, res) => {
   try {
     const r = await spotify('get', '/me');
     res.json({ ok: true, user: r.data.display_name, email: r.data.email });
-  } catch {
-    res.json({ ok: false });
+  } catch (err) {
+    console.error('❌ /api/status — Spotify desconectado:', err.response?.status, err.response?.data || err.message);
+    res.json({ ok: false, reason: err.response?.data?.error?.message || err.response?.data?.error_description || err.message });
   }
+});
+
+// ═══════════════════════════════════════════════════════
+// LOGS DO SERVIDOR (PM2) — pro Dashboard RH
+// ═══════════════════════════════════════════════════════
+
+// Lê só o final do arquivo (evita carregar logs gigantes na memória)
+function tailFile(filePath, maxLines, maxBytes = 400000) {
+  if (!filePath || !fs.existsSync(filePath)) return [];
+  const stat = fs.statSync(filePath);
+  const start = Math.max(0, stat.size - maxBytes);
+  const length = stat.size - start;
+  if (length <= 0) return [];
+  const buf = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, 'r');
+  fs.readSync(fd, buf, 0, length, start);
+  fs.closeSync(fd);
+  const lines = buf.toString('utf8').split('\n').filter(l => l.length);
+  if (start > 0) lines.shift(); // 1ª linha pode ter sido cortada no meio
+  return lines.slice(-maxLines);
+}
+
+app.get('/api/logs', requireAdmin, (req, res) => {
+  const lines = Math.min(parseInt(req.query.lines) || 200, 1000);
+  execCP('pm2 jlist', { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+    if (err) return res.status(500).json({ error: 'PM2 indisponível: ' + err.message });
+    let procs;
+    try { procs = JSON.parse(stdout); } catch { return res.status(500).json({ error: 'Resposta inválida do pm2 jlist' }); }
+
+    const pmId = process.env.pm_id;
+    const proc = procs.find(p => String(p.pm_id) === String(pmId))
+      || procs.find(p => p.name === 'crescent-hub-server')
+      || procs[0];
+
+    if (!proc) return res.status(404).json({ error: 'Nenhum processo PM2 encontrado' });
+
+    const out = tailFile(proc.pm2_env.pm_out_log_path, lines).map(text => ({ text, stream: 'out' }));
+    const errLines = tailFile(proc.pm2_env.pm_err_log_path, lines).map(text => ({ text, stream: 'error' }));
+
+    res.json({
+      ok: true,
+      name: proc.name,
+      pid: proc.pid,
+      uptime: proc.pm2_env.pm_uptime,
+      restarts: proc.pm2_env.restart_time,
+      status: proc.pm2_env.status,
+      memory: proc.monit?.memory,
+      cpu: proc.monit?.cpu,
+      out,
+      error: errLines,
+    });
+  });
 });
 
 // Cache de progresso — evita bater no Spotify a cada request do frontend (letras sincronizadas)
