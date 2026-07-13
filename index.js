@@ -1251,7 +1251,9 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
     }
     // Retry com backoff exponencial para erros 5xx transitórios (502, 503, 504)
     if (retries > 0 && err.response?.status >= 500) {
-      const delay = 1500 * Math.pow(2, _attempt); // 1.5s, 3s
+      // + jitter (0-500ms) pra não sincronizar retries de várias buscas simultâneas
+      // batendo no Spotify no mesmo instante (thundering herd) quando ele está instável.
+      const delay = 1500 * Math.pow(2, _attempt) + Math.random() * 500; // ~1.5s, ~3s
       if (_attempt === 0) console.warn(`⚠️  Spotify ${err.response.status} em ${path.split('?')[0]} — retrying...`);
       await new Promise(r => setTimeout(r, delay));
       return spotify(method, path, data, { retries: retries - 1, _attempt: _attempt + 1 });
@@ -1361,6 +1363,11 @@ app.get('/api/progress', async (req, res) => {
 // Cache de busca — evita múltiplos hits no Spotify para a mesma query em 60s
 const searchCache = new Map();
 const SEARCH_CACHE_TTL = 60_000;
+// Buscas idênticas EM VOO ao mesmo tempo compartilham UMA chamada ao Spotify (dedup).
+// A Central Alexa é usada por vários colegas juntos — sem isso, todo mundo digitando
+// "taylor swift" ao mesmo tempo dispara N chamadas iguais (e N retries) quando o
+// Spotify está instável. key -> Promise<tracks>.
+const searchInflight = new Map();
 
 const mapSearchTrack = t => ({
   id:           t.id,
@@ -1372,6 +1379,27 @@ const mapSearchTrack = t => ({
   duration_ms:  t.duration_ms,
   duration_str: `${Math.floor(t.duration_ms / 60000)}:${String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}`,
 });
+
+// Faz a busca no Spotify (com dedup em voo + grava no cache). Lança em erro.
+async function runSearch(key, q) {
+  if (searchInflight.has(key)) return searchInflight.get(key);
+  const p = (async () => {
+    const qEnc = encodeURIComponent(q);
+    // market=BR: resultados na região certa e evita alguns erros de edge do Spotify.
+    const r = await spotify('get', `/search?q=${qEnc}&type=track&limit=8&market=BR`);
+    const tracks = r.data.tracks.items.map(mapSearchTrack);
+    searchCache.set(key, { tracks, at: Date.now() });
+    if (searchCache.size > 300) {
+      const now = Date.now();
+      for (const [k, v] of searchCache)
+        if (now - v.at > SEARCH_CACHE_TTL) searchCache.delete(k);
+    }
+    return tracks;
+  })();
+  searchInflight.set(key, p);
+  p.finally(() => searchInflight.delete(key)).catch(() => {}); // limpa sempre, sem unhandled
+  return p;
+}
 
 app.get('/api/search', async (req, res) => {
   const { q } = req.query;
@@ -1385,21 +1413,18 @@ app.get('/api/search', async (req, res) => {
     return res.json({ tracks: cached.tracks });
   }
 
-  const qEnc = encodeURIComponent(q);
   try {
-    const r = await spotify('get', `/search?q=${qEnc}&type=track&limit=8`);
-    const tracks = r.data.tracks.items.map(mapSearchTrack);
-
-    // Salva no cache e limpa entradas velhas
-    searchCache.set(key, { tracks, at: Date.now() });
-    if (searchCache.size > 300) {
-      const now = Date.now();
-      for (const [k, v] of searchCache)
-        if (now - v.at > SEARCH_CACHE_TTL) searchCache.delete(k);
-    }
-
+    const tracks = await runSearch(key, q);
     res.json({ tracks });
   } catch (err) {
+    // FALLBACK: o Spotify falhou, mas se já temos um resultado anterior dessa MESMA
+    // query (mesmo expirado), devolve ele — resultado de busca não muda de minuto em
+    // minuto, então é muito melhor mostrar o último bom do que um erro na cara do
+    // usuário toda vez que o Spotify tem um 502 transitório.
+    if (cached) {
+      console.warn(`⚠️  Search falhou (${err.response?.status || err.message}) — servindo cache antigo de "${key}"`);
+      return res.json({ tracks: cached.tracks, stale: true });
+    }
     const status = err.response?.status;
     const detail = err.response?.data?.error?.message || err.message;
     console.error(`❌ Search (HTTP ${status}):`, detail);
