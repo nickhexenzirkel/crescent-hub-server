@@ -1275,7 +1275,7 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
 // pollando o status; sem cache, cada poll batia em /me no Spotify (volume enorme que
 // ajudava a estourar a cota diária). Guarda o resultado (positivo E negativo) por 30s.
 let statusCache = { at: 0, body: null };
-const STATUS_CACHE_MS = 30_000;
+const STATUS_CACHE_MS = 60_000;
 
 app.get('/api/status', async (req, res) => {
   const now = Date.now();
@@ -1383,9 +1383,12 @@ app.get('/api/progress', async (req, res) => {
 // BUSCA DE MÚSICAS
 // ═══════════════════════════════════════════════════════
 
-// Cache de busca — evita múltiplos hits no Spotify para a mesma query em 60s
+// Cache de busca — evita múltiplos hits no Spotify para a mesma query em 3 min.
+// TTL alto de propósito: resultado de busca não muda de minuto em minuto, e o app
+// vive em Development Mode (cota baixa por janela de 30s) — quanto mais gente
+// compartilhar a mesma resposta cacheada, menos chamada real vai ao Spotify.
 const searchCache = new Map();
-const SEARCH_CACHE_TTL = 60_000;
+const SEARCH_CACHE_TTL = 180_000;
 // Buscas idênticas EM VOO ao mesmo tempo compartilham UMA chamada ao Spotify (dedup).
 // A Central Alexa é usada por vários colegas juntos — sem isso, todo mundo digitando
 // "taylor swift" ao mesmo tempo dispara N chamadas iguais (e N retries) quando o
@@ -1428,7 +1431,9 @@ app.get('/api/search', async (req, res) => {
   const { q } = req.query;
   if (!q?.trim()) return res.status(400).json({ error: 'Query vazia' });
 
-  const key = q.trim().toLowerCase();
+  // Normaliza a chave (minúsculas + colapsa espaços) p/ maximizar acerto de cache:
+  // "Matuê", "matuê" e "matuê  " compartilham a MESMA entrada e a MESMA chamada.
+  const key = q.trim().toLowerCase().replace(/\s+/g, ' ');
 
   // Retorna do cache se ainda válido
   const cached = searchCache.get(key);
@@ -2586,17 +2591,18 @@ async function monitorPlayback() {
 }
 
 // Cadência ADAPTATIVA — 4s enquanto TOCA (preciso p/ transição de fim de música),
-// 20s quando OCIOSO (nada tocando). Antes era 4s fixo 24h/dia, mesmo de madrugada sem
+// 40s quando OCIOSO (nada tocando). Antes era 4s fixo 24h/dia, mesmo de madrugada sem
 // ninguém usando → ~21 mil chamadas/dia ao Spotify só disso, o que estourava a cota
-// diária e gerava os rate limits gigantes. Ocioso a 20s corta ~80% dessas chamadas.
-const MONITOR_FAST_MS = 4000, MONITOR_IDLE_MS = 20000;
+// diária e gerava os rate limits gigantes. Ocioso a 40s corta ~90% dessas chamadas —
+// necessário porque o app está em Development Mode (teto baixo por janela de 30s).
+const MONITOR_FAST_MS = 4000, MONITOR_IDLE_MS = 40000;
 async function monitorLoop() {
   let playing = false;
   try { playing = await monitorPlayback(); } catch {}
   setTimeout(monitorLoop, playing ? MONITOR_FAST_MS : MONITOR_IDLE_MS);
 }
 monitorLoop();
-console.log('🔁 Monitor de playback iniciado (4s tocando / 20s ocioso) — sincroniza Spotify + Alexa');
+console.log('🔁 Monitor de playback iniciado (4s tocando / 40s ocioso) — sincroniza Spotify + Alexa');
 
 // ═══════════════════════════════════════════════════════
 // FATURAMENTO — Relatório de Consumo (7Benefícios)
