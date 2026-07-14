@@ -1272,6 +1272,13 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
   }
   const token = await ensureToken();
   await acquireSpotifySlot(); // nunca passa do teto de chamadas/30s (evita o próprio 429)
+  // Re-checa o guard: enquanto esperávamos o slot, uma chamada IRMÃ concorrente pode ter
+  // acabado de levar 429 e setado rateLimitedUntil. Sem isso, uma rajada de buscas
+  // simultâneas bate TODA no Spotify durante o ban (thundering-herd) e refresca a punição.
+  if (Date.now() < rateLimitedUntil) {
+    const waitSec = Math.round((rateLimitedUntil - Date.now()) / 1000);
+    throw Object.assign(new Error(`Rate limit ativo — aguardando ${waitSec}s`), { response: { status: 429 } });
+  }
   try {
     return await axios({
       method,
@@ -1290,10 +1297,16 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
       //    Mode). Aqui NÃO adianta sondar de 20 em 20min: o ban só expira no reset, e cada
       //    sondagem é chamada desperdiçada + spam de log. Recua 1h entre re-checks.
       const isDailyBan = raRaw > 1200;
-      const retryAfter = Math.min(raRaw, isDailyBan ? 3600 : 1200);
+      // Ban de cota diária: HONRA o retry-after real (cap de 24h por sanidade). Aprendemos
+      // na marra (2026-07-14) que FICAR SONDANDO durante o ban só REFRESCA a punição — o
+      // retry-after real caía muito mais devagar que o tempo real passando (ex.: 60816s →
+      // 60145s em ~1h; cada sondagem empurrava o desbloqueio ~49min pra frente). Então agora
+      // esperamos de verdade até o Spotify liberar, SEM re-sondar no meio — é o que deixa o
+      // ban expirar limpo. 429 transitório continua com teto de 20min.
+      const retryAfter = isDailyBan ? Math.min(raRaw, 86400) : Math.min(raRaw, 1200);
       rateLimitedUntil = Date.now() + retryAfter * 1000;
       if (isDailyBan)
-        console.warn(`⛔ Spotify: BAN DE COTA DIÁRIA — retry-after real ${raRaw}s (~${(raRaw/3600).toFixed(1)}h). Só volta no reset; re-checando em ${Math.round(retryAfter/60)}min.`);
+        console.warn(`⛔ Spotify: BAN DE COTA DIÁRIA — retry-after real ${raRaw}s (~${(raRaw/3600).toFixed(1)}h). Aguardando o reset SEM re-sondar (sondar refresca o ban).`);
       else
         console.warn(`⏸  Rate limit Spotify — pausando por ${retryAfter}s`);
     }
