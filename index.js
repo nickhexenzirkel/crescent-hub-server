@@ -1245,9 +1245,14 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
     });
   } catch (err) {
     if (err.response?.status === 429) {
-      const retryAfter = parseInt(err.response?.headers?.['retry-after'] || '60');
+      const raRaw = parseInt(err.response?.headers?.['retry-after'] || '60');
+      // TETO de 20min: o Spotify às vezes manda retry-after de HORAS (visto: 22210s ≈ 6h),
+      // o que derrubava a Central Alexa o dia inteiro. Com o volume de chamadas já reduzido
+      // (status/progress cacheados + monitor adaptativo), sondar de novo a cada 20min é
+      // seguro — se ainda estiver limitado, o Spotify manda um novo retry-after.
+      const retryAfter = Math.min(raRaw, 1200);
       rateLimitedUntil = Date.now() + retryAfter * 1000;
-      console.warn(`⏸  Rate limit Spotify — pausando chamadas por ${retryAfter}s`);
+      console.warn(`⏸  Rate limit Spotify — pausando por ${retryAfter}s${raRaw > 1200 ? ` (retry-after real ${raRaw}s limitado a 1200s)` : ''}`);
     }
     // Retry com backoff exponencial para erros 5xx transitórios (502, 503, 504)
     if (retries > 0 && err.response?.status >= 500) {
@@ -1266,13 +1271,28 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
 // STATUS
 // ═══════════════════════════════════════════════════════
 
+// Cache do /api/status — a Central Alexa fica com essa aba aberta em VÁRIAS máquinas
+// pollando o status; sem cache, cada poll batia em /me no Spotify (volume enorme que
+// ajudava a estourar a cota diária). Guarda o resultado (positivo E negativo) por 30s.
+let statusCache = { at: 0, body: null };
+const STATUS_CACHE_MS = 30_000;
+
 app.get('/api/status', async (req, res) => {
+  const now = Date.now();
+  if (statusCache.body && (now - statusCache.at) < STATUS_CACHE_MS) {
+    return res.json(statusCache.body);
+  }
   try {
     const r = await spotify('get', '/me');
-    res.json({ ok: true, user: r.data.display_name, email: r.data.email });
+    statusCache = { at: now, body: { ok: true, user: r.data.display_name, email: r.data.email } };
+    res.json(statusCache.body);
   } catch (err) {
+    const body = { ok: false, reason: err.response?.data?.error?.message || err.response?.data?.error_description || err.message };
+    // Cacheia o negativo também (curto) — evita spam de log + chamadas repetidas enquanto
+    // o Spotify está fora/rate-limited. Reconecta em até STATUS_CACHE_MS.
+    statusCache = { at: now, body };
     console.error('❌ /api/status — Spotify desconectado:', err.response?.status, err.response?.data || err.message);
-    res.json({ ok: false, reason: err.response?.data?.error?.message || err.response?.data?.error_description || err.message });
+    res.json(body);
   }
 });
 
@@ -1328,9 +1348,12 @@ app.get('/api/logs', requireAdmin, (req, res) => {
   });
 });
 
-// Cache de progresso — evita bater no Spotify a cada request do frontend (letras sincronizadas)
+// Cache de progresso — evita bater no Spotify a cada request do frontend (letras sincronizadas).
+// O monitorPlayback já atualiza esse cache a cada ~4s enquanto toca; com o TTL acima do
+// ciclo do monitor, o /api/progress praticamente NUNCA chama o Spotify direto (o frontend
+// interpola o progresso localmente entre as atualizações). Era 1.5s → gerava chamadas extras.
 let progressCache = { data: null, at: 0 };
-const PROGRESS_CACHE_MS = 1500; // reusa resultado por 1.5s
+const PROGRESS_CACHE_MS = 5000; // reusa resultado por 5s (monitor renova a cada 4s tocando)
 
 app.get('/api/progress', async (req, res) => {
   try {
@@ -2432,7 +2455,7 @@ async function monitorPlayback() {
       nearEndTriggered   = false;
       wasPlaying         = false;
       progressCache      = { data: { progress_ms: 0, is_playing: false }, at: Date.now() };
-      return;
+      return false;
     }
 
     const { item, progress_ms, is_playing } = r.data;
@@ -2466,7 +2489,7 @@ async function monitorPlayback() {
           lastQueueSongId    = null;
           lastProgressMs     = 0;
           await advanceQueue('auto');
-          return;
+          return false;
         }
         // Pausa manual no meio da música
         await supabase.from('player_state').upsert({
@@ -2476,7 +2499,7 @@ async function monitorPlayback() {
       }
       wasPlaying    = false;
       progressCache = { data: { progress_ms: progress_ms || 0, is_playing: false }, at: Date.now() };
-      return;
+      return false;
     }
 
     // ── Tocando ───────────────────────────────────────────
@@ -2553,15 +2576,27 @@ async function monitorPlayback() {
 
     if (remaining > 15000) nearEndTriggered = false;
 
+    return true; // está tocando → o loop mantém a cadência rápida (4s)
   } catch (err) {
     const status = err.response?.status;
-    if (status && [400, 401, 404, 429].includes(status)) return;
+    if (status && [400, 401, 404, 429].includes(status)) return false;
     console.error('⚠️  Monitor:', err.response?.data?.error?.message || err.message);
+    return false;
   }
 }
 
-setInterval(monitorPlayback, 4000);
-console.log('🔁 Monitor de playback iniciado (4s) — sincroniza Spotify + Alexa em tempo real');
+// Cadência ADAPTATIVA — 4s enquanto TOCA (preciso p/ transição de fim de música),
+// 20s quando OCIOSO (nada tocando). Antes era 4s fixo 24h/dia, mesmo de madrugada sem
+// ninguém usando → ~21 mil chamadas/dia ao Spotify só disso, o que estourava a cota
+// diária e gerava os rate limits gigantes. Ocioso a 20s corta ~80% dessas chamadas.
+const MONITOR_FAST_MS = 4000, MONITOR_IDLE_MS = 20000;
+async function monitorLoop() {
+  let playing = false;
+  try { playing = await monitorPlayback(); } catch {}
+  setTimeout(monitorLoop, playing ? MONITOR_FAST_MS : MONITOR_IDLE_MS);
+}
+monitorLoop();
+console.log('🔁 Monitor de playback iniciado (4s tocando / 20s ocioso) — sincroniza Spotify + Alexa');
 
 // ═══════════════════════════════════════════════════════
 // FATURAMENTO — Relatório de Consumo (7Benefícios)
