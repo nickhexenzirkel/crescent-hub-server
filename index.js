@@ -1226,8 +1226,43 @@ async function ensureToken() {
   return tokens.access;
 }
 
+// ── THROTTLE GLOBAL de saída pro Spotify ──────────────────────────────────
+// O rate limit do Spotify é por JANELA DESLIZANTE DE 30s. Em vez de só reagir ao
+// 429 DEPOIS de estourar (e apanhar castigo escalado até horas), este limitador
+// GARANTE, na origem, que nunca passamos de RL_MAX_CALLS chamadas em qualquer
+// janela de 30s, e serializa a LARGADA das chamadas com um gap mínimo — mata o
+// thundering-herd de várias buscas simultâneas batendo no mesmo instante. É o que
+// mantém o app dentro do teto do Development Mode com as 18 pessoas usando junto.
+// Ajustável por env sem redeploy: SPOTIFY_MAX_CALLS_PER_30S.
+const RL_WINDOW_MS  = 30_000;
+const RL_MAX_CALLS  = Number(process.env.SPOTIFY_MAX_CALLS_PER_30S || 60);
+const RL_MIN_GAP_MS = 150;
+let   rlQueue       = Promise.resolve(); // fila serial de aquisição de slot
+let   rlTimestamps  = [];                // horários das chamadas dentro da janela
+let   rlLastAt      = 0;
+
+// Aguarda um slot livre respeitando (a) teto por janela de 30s e (b) gap mínimo.
+function acquireSpotifySlot() {
+  const run = rlQueue.then(async () => {
+    let now = Date.now();
+    rlTimestamps = rlTimestamps.filter(t => now - t < RL_WINDOW_MS);
+    if (rlTimestamps.length >= RL_MAX_CALLS) {
+      const waitMs = RL_WINDOW_MS - (now - rlTimestamps[0]) + 5;
+      await new Promise(r => setTimeout(r, waitMs));
+      now = Date.now();
+      rlTimestamps = rlTimestamps.filter(t => now - t < RL_WINDOW_MS);
+    }
+    const sinceLast = Date.now() - rlLastAt;
+    if (sinceLast < RL_MIN_GAP_MS) await new Promise(r => setTimeout(r, RL_MIN_GAP_MS - sinceLast));
+    rlLastAt = Date.now();
+    rlTimestamps.push(rlLastAt);
+  });
+  rlQueue = run.catch(() => {}); // a fila avança mesmo se algo falhar
+  return run;
+}
+
 // Wrapper para chamadas à Spotify Web API
-// Implementa backoff automático quando recebe 429 (rate limit)
+// Implementa throttle global + backoff automático quando recebe 429 (rate limit)
 let rateLimitedUntil = 0;
 
 async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
@@ -1236,12 +1271,14 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
     throw Object.assign(new Error(`Rate limit ativo — aguardando ${waitSec}s`), { response: { status: 429 } });
   }
   const token = await ensureToken();
+  await acquireSpotifySlot(); // nunca passa do teto de chamadas/30s (evita o próprio 429)
   try {
     return await axios({
       method,
       url:     `https://api.spotify.com/v1${path}`,
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       data:    data || undefined,
+      timeout: 15000, // evita que uma chamada pendurada trave a fila indefinidamente
     });
   } catch (err) {
     if (err.response?.status === 429) {
