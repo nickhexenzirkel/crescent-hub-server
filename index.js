@@ -26,11 +26,6 @@ const playwrightReadyPromise = new Promise((resolve) => {
 
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
 const YTDLP_BIN     = '/tmp/yt-dlp';
-// Proxy opcional pro yt-dlp — resolve o bloqueio de IP do YouTube na VPS fazendo os
-// downloads saírem por um IP residencial confiável (túnel SOCKS pela rede do escritório).
-// Ex.: YTDLP_PROXY=socks5://127.0.0.1:1080  — porta aberta por um `ssh -R 1080 root@vps`
-// rodando numa máquina do escritório. Vazio = sem proxy (comportamento antigo).
-const YTDLP_PROXY   = process.env.YTDLP_PROXY || '';
 const YTCOOKIES_FILE = '/tmp/yt-cookies.txt';
 const FFMPEG_DIR    = '/tmp/ffmpeg-bin';   // ffmpeg estático extraído aqui
 let FFMPEG_LOCATION = '';                    // dir passado ao yt-dlp (--ffmpeg-location)
@@ -107,6 +102,13 @@ const cron     = require('node-cron');
 const AlexaRemote = require('alexa-remote2');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+
+// Proxy opcional pro yt-dlp — resolve o bloqueio de IP do YouTube na VPS fazendo os
+// downloads saírem por um IP residencial confiável (túnel SOCKS pela rede do escritório).
+// Ex.: YTDLP_PROXY=socks5://127.0.0.1:1080 — porta aberta por um `ssh -R 1080 root@vps`
+// rodando numa máquina do escritório. Vazio = sem proxy (comportamento antigo).
+// Lido AQUI (depois do dotenv.config) pra funcionar tanto via .env quanto via env real.
+const YTDLP_PROXY = process.env.YTDLP_PROXY || '';
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
