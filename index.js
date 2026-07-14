@@ -26,6 +26,11 @@ const playwrightReadyPromise = new Promise((resolve) => {
 
 // ─── YT-DLP: baixa o binário uma vez por sessão ──────────────────────────────
 const YTDLP_BIN     = '/tmp/yt-dlp';
+// Proxy opcional pro yt-dlp — resolve o bloqueio de IP do YouTube na VPS fazendo os
+// downloads saírem por um IP residencial confiável (túnel SOCKS pela rede do escritório).
+// Ex.: YTDLP_PROXY=socks5://127.0.0.1:1080  — porta aberta por um `ssh -R 1080 root@vps`
+// rodando numa máquina do escritório. Vazio = sem proxy (comportamento antigo).
+const YTDLP_PROXY   = process.env.YTDLP_PROXY || '';
 const YTCOOKIES_FILE = '/tmp/yt-cookies.txt';
 const FFMPEG_DIR    = '/tmp/ffmpeg-bin';   // ffmpeg estático extraído aqui
 let FFMPEG_LOCATION = '';                    // dir passado ao yt-dlp (--ffmpeg-location)
@@ -3138,6 +3143,7 @@ async function downloadVideoWithYtDlp(videoId) {
   ];
   if (FFMPEG_LOCATION) args.push('--ffmpeg-location', FFMPEG_LOCATION);
   if (ytCookiesOk) args.push('--cookies', YTCOOKIES_FILE);
+  if (YTDLP_PROXY) args.push('--proxy', YTDLP_PROXY);
   args.push(`https://www.youtube.com/watch?v=${videoId}`);
 
   console.log(`🎵 yt-dlp baixando ${videoId}...`);
@@ -3380,6 +3386,7 @@ function buildExtractArgs(clients, usePot) {
   // Cookies SÃO necessários para passar o "confirm you're not a bot" na nuvem.
   // Com cookies, o POT é vinculado à conta (datasync) — combinação correta.
   if (ytCookiesOk) a.push('--cookies', YTCOOKIES_FILE);
+  if (YTDLP_PROXY) a.push('--proxy', YTDLP_PROXY);
   return a;
 }
 
@@ -3406,7 +3413,7 @@ async function downloadAudioWithYtDlp(videoId) {
     const args = [...extractArgs, '--no-warnings', '--no-progress',
       '-f', 'bestaudio/best', '-o', `/tmp/uw_a_${videoId}.%(ext)s`, url];
 
-    console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (cliente=${clients}, POT=${usePot}, cookies=${ytCookiesOk})...`);
+    console.log(`🎵 yt-dlp baixando ÁUDIO ${videoId} (cliente=${clients}, POT=${usePot}, cookies=${ytCookiesOk}, proxy=${YTDLP_PROXY ? 'on' : 'off'})...`);
     const r = await runProc(YTDLP_BIN, args);
 
     if (r.code === 0) {
