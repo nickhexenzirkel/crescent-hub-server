@@ -2982,7 +2982,7 @@ async function downloadVideoWithPlaywright(videoId) {
       '--autoplay-policy=no-user-gesture-required', '--disable-features=Translate,BackForwardCache'],
   });
 
-  let streamUrl = null, streamIsAudio = false, chosenFormat = null;
+  let streamUrl = null, streamIsAudio = false, chosenFormat = null, result = null;
 
   try {
     const context = await browser.newContext({
@@ -3046,18 +3046,37 @@ async function downloadVideoWithPlaywright(videoId) {
     // Espera capturar um stream de ÁUDIO (até ~15s); se só vier vídeo, serve também.
     for (let i = 0; i < 30 && !streamIsAudio; i++) await page.waitForTimeout(500);
     console.log(`🎭 stream ${streamUrl ? 'capturado' + (streamIsAudio ? ' (áudio)' : ' (vídeo)') : 'NÃO capturado'}`);
+
+    // Baixa o stream DENTRO da sessão do navegador (context.request reaproveita os mesmos
+    // cookies/TLS/headers do Chromium). MUITO mais confiável que um https.get cru: as URLs
+    // de googlevideo costumam devolver 403 fora do contexto do navegador que as gerou.
+    if (streamUrl) {
+      const ext = streamIsAudio ? 'm4a' : 'mp4';
+      const outPath = `/tmp/uw_${videoId}.${ext}`;
+      console.log(`🎭 Baixando ${videoId} (${streamIsAudio ? 'áudio' : 'vídeo'} via stream real)...`);
+      const resp = await context.request.get(streamUrl, {
+        headers: { 'Referer': 'https://www.youtube.com/', 'Range': 'bytes=0-' },
+        timeout: 120000,
+      });
+      const st = resp.status();
+      if (st !== 200 && st !== 206) throw new Error(`stream HTTP ${st}`);
+      fs.writeFileSync(outPath, await resp.body());
+      const sz = fs.statSync(outPath).size;
+      if (sz < 10000) throw new Error(`stream vazio (${sz} bytes)`);
+      console.log(`✓ mídia ${videoId} baixada (${sz} bytes)`);
+      result = { path: outPath, ext };
+    }
   } finally {
     await browser.close().catch(() => {});
   }
 
-  // Fonte: stream real capturado (preferido, já decifrado) ou formato com url direta.
-  const dlUrl = streamUrl || chosenFormat?.url;
-  if (!dlUrl) throw new Error('Playwright: navegador não obteve o stream (YouTube pode ter bloqueado o IP mesmo no navegador real)');
+  if (result) return result;
 
-  const ext = streamUrl ? (streamIsAudio ? 'm4a' : 'mp4') : (chosenFormat.mimeType?.includes('webm') ? 'webm' : 'mp4');
+  // Fallback: formato com url direta dos metadados (raro hoje) — download cru via https.
+  if (!chosenFormat?.url) throw new Error('Playwright: navegador não obteve o stream (YouTube pode ter bloqueado o IP mesmo no navegador real)');
+  const ext = chosenFormat.mimeType?.includes('webm') ? 'webm' : 'mp4';
   const outPath = `/tmp/uw_${videoId}.${ext}`;
-
-  console.log(`🎭 Baixando ${videoId} (${streamUrl ? (streamIsAudio ? 'áudio' : 'vídeo') + ' via stream real' : chosenFormat.height + 'p'})...`);
+  console.log(`🎭 Baixando ${videoId} (${chosenFormat.height}p via formato direto)...`);
   await new Promise((resolve, reject) => {
     const file = fs.createWriteStream(outPath);
     const https = require('https');
@@ -3077,9 +3096,8 @@ async function downloadVideoWithPlaywright(videoId) {
         file.on('finish', () => file.close(resolve));
       }).on('error', (e) => { file.close(() => {}); reject(e); });
     };
-    doGet(dlUrl, 5);
+    doGet(chosenFormat.url, 5);
   });
-
   console.log(`✓ mídia ${videoId} baixada (${fs.statSync(outPath).size} bytes)`);
   return { path: outPath, ext };
 }
