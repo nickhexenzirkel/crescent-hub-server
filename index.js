@@ -2967,7 +2967,7 @@ function pickVideoFormat(formats) {
 }
 
 async function downloadVideoWithPlaywright(videoId) {
-  // Garante que o Chromium terminou de instalar antes de lançar (cold start do Render)
+  // Garante que o Chromium terminou de instalar antes de lançar (cold start)
   if (!playwrightReady) {
     console.log(`⏳ Aguardando Chromium do Playwright ficar pronto [${videoId}]...`);
     await playwrightReadyPromise;
@@ -2975,15 +2975,14 @@ async function downloadVideoWithPlaywright(videoId) {
 
   const browser = await chromium.launch({
     headless: true,
-    // Flags de BAIXA MEMÓRIA (Render free 512MB): processo único, sem zygote,
-    // V8 limitado e sem features extras. Evita o OOM ao abrir o Chromium.
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--autoplay-policy=no-user-gesture-required',
-      '--single-process', '--no-zygote', '--disable-features=site-per-process,Translate,BackForwardCache',
-      '--disable-extensions', '--disable-background-networking', '--mute-audio',
-      '--js-flags=--max-old-space-size=128'],
+    // Flags relaxadas: na VPS Hostinger tem RAM de sobra (o --single-process/--no-zygote
+    // e o V8 capado eram gambiarra pro Render free de 512MB e deixavam o Chromium instável).
+    // Mantém só o essencial pra rodar headless em servidor + autoplay pra buscar o stream.
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--mute-audio',
+      '--autoplay-policy=no-user-gesture-required', '--disable-features=Translate,BackForwardCache'],
   });
 
-  let chosenFormat = null;
+  let streamUrl = null, streamIsAudio = false, chosenFormat = null;
 
   try {
     const context = await browser.newContext({
@@ -3005,9 +3004,21 @@ async function downloadVideoWithPlaywright(videoId) {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
-    // Método 1: intercepta a player API com regex (mais confiável que glob)
+    // MÉTODO PRINCIPAL: captura a URL de streaming REAL (googlevideo/videoplayback) que o
+    // navegador busca ao TOCAR — ela já vem ASSINADA e DECIFRADA pelo player do YouTube.
+    // Resolve o motivo do "Nenhum formato com URL direta": hoje os formatos dos metadados
+    // vêm com signatureCipher (URL cifrada), mas o stream que o browser realmente pede não.
+    // Preferimos áudio puro (mime=audio) — é tudo que a análise de ritmo precisa.
+    page.on('request', (req) => {
+      const u = req.url();
+      if (!u.includes('googlevideo.com/videoplayback')) return;
+      const isAudio = /[?&]mime=audio/i.test(u);
+      if (isAudio) { if (!streamIsAudio) { streamUrl = u; streamIsAudio = true; } }
+      else if (!streamUrl) { streamUrl = u; }
+    });
+
+    // FALLBACK: intercepta a player API pra pegar formatos com url direta (raro hoje)
     await page.route(/youtube\.com\/youtubei\/v1\/player/, async (route) => {
-      console.log(`🎭 Player API interceptada: ${route.request().url().split('?')[0]}`);
       try {
         const response = await route.fetch();
         const text = await response.text();
@@ -3017,7 +3028,6 @@ async function downloadVideoWithPlaywright(videoId) {
             const all = [...(data.streamingData.formats||[]), ...(data.streamingData.adaptiveFormats||[])];
             console.log(`🎭 ${all.length} formatos — ${all.filter(f=>f.url).length} com URL direta, ${all.filter(f=>f.signatureCipher).length} com cipher`);
             chosenFormat = pickVideoFormat(all);
-            if (chosenFormat) console.log(`🎭 Formato: itag=${chosenFormat.itag} ${chosenFormat.height}p`);
           }
         } catch {}
         await route.fulfill({ body: text, status: response.status(), headers: response.headers() });
@@ -3027,32 +3037,27 @@ async function downloadVideoWithPlaywright(videoId) {
     console.log(`🎭 Abrindo YouTube: ${videoId}`);
     await page.goto(`https://www.youtube.com/watch?v=${videoId}`, { waitUntil: 'load', timeout: 40000 });
 
-    // Aguarda a player API ser chamada (pode acontecer depois de 'load')
-    if (!chosenFormat) await page.waitForTimeout(6000);
+    // Força a reprodução (autoplay costuma exigir mudo) pra o browser buscar o stream real.
+    await page.evaluate(() => {
+      const v = document.querySelector('video');
+      if (v) { v.muted = true; const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+    }).catch(() => {});
 
-    // Método 2: extrai do ytInitialPlayerResponse se a interceptação não funcionou
-    if (!chosenFormat) {
-      console.log('🎭 Tentando ytInitialPlayerResponse...');
-      try {
-        const data = await page.evaluate(() => window.ytInitialPlayerResponse || null);
-        if (data?.streamingData) {
-          const all = [...(data.streamingData.formats||[]), ...(data.streamingData.adaptiveFormats||[])];
-          console.log(`🎭 ytInitialPlayerResponse: ${all.length} formatos, ${all.filter(f=>f.url).length} com URL direta`);
-          chosenFormat = pickVideoFormat(all);
-          if (chosenFormat) console.log(`🎭 Formato via ytInitialPlayerResponse: itag=${chosenFormat.itag}`);
-        }
-      } catch(e) { console.warn('🎭 ytInitialPlayerResponse falhou:', e.message); }
-    }
+    // Espera capturar um stream de ÁUDIO (até ~15s); se só vier vídeo, serve também.
+    for (let i = 0; i < 30 && !streamIsAudio; i++) await page.waitForTimeout(500);
+    console.log(`🎭 stream ${streamUrl ? 'capturado' + (streamIsAudio ? ' (áudio)' : ' (vídeo)') : 'NÃO capturado'}`);
   } finally {
     await browser.close().catch(() => {});
   }
 
-  if (!chosenFormat?.url) throw new Error('Nenhum formato de vídeo com URL direta disponível');
+  // Fonte: stream real capturado (preferido, já decifrado) ou formato com url direta.
+  const dlUrl = streamUrl || chosenFormat?.url;
+  if (!dlUrl) throw new Error('Playwright: navegador não obteve o stream (YouTube pode ter bloqueado o IP mesmo no navegador real)');
 
-  const ext = chosenFormat.mimeType?.includes('webm') ? 'webm' : 'mp4';
+  const ext = streamUrl ? (streamIsAudio ? 'm4a' : 'mp4') : (chosenFormat.mimeType?.includes('webm') ? 'webm' : 'mp4');
   const outPath = `/tmp/uw_${videoId}.${ext}`;
 
-  console.log(`🎭 Baixando ${videoId} (${chosenFormat.height}p ${ext})...`);
+  console.log(`🎭 Baixando ${videoId} (${streamUrl ? (streamIsAudio ? 'áudio' : 'vídeo') + ' via stream real' : chosenFormat.height + 'p'})...`);
   await new Promise((resolve, reject) => {
     const file = fs.createWriteStream(outPath);
     const https = require('https');
@@ -3072,10 +3077,10 @@ async function downloadVideoWithPlaywright(videoId) {
         file.on('finish', () => file.close(resolve));
       }).on('error', (e) => { file.close(() => {}); reject(e); });
     };
-    doGet(chosenFormat.url, 5);
+    doGet(dlUrl, 5);
   });
 
-  console.log(`✓ vídeo ${videoId} baixado (${fs.statSync(outPath).size} bytes)`);
+  console.log(`✓ mídia ${videoId} baixada (${fs.statSync(outPath).size} bytes)`);
   return { path: outPath, ext };
 }
 
