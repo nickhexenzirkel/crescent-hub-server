@@ -1246,13 +1246,19 @@ async function spotify(method, path, data, { retries = 2, _attempt = 0 } = {}) {
   } catch (err) {
     if (err.response?.status === 429) {
       const raRaw = parseInt(err.response?.headers?.['retry-after'] || '60');
-      // TETO de 20min: o Spotify às vezes manda retry-after de HORAS (visto: 22210s ≈ 6h),
-      // o que derrubava a Central Alexa o dia inteiro. Com o volume de chamadas já reduzido
-      // (status/progress cacheados + monitor adaptativo), sondar de novo a cada 20min é
-      // seguro — se ainda estiver limitado, o Spotify manda um novo retry-after.
-      const retryAfter = Math.min(raRaw, 1200);
+      // Dois regimes de 429:
+      //  • TRANSITÓRIO (rolling 30s) → retry-after de segundos/minutos. Sondar em até
+      //    20min é seguro; se ainda estiver limitado, o Spotify manda novo retry-after.
+      //  • BAN DE COTA DIÁRIA → retry-after de HORAS (visto: 61707s ≈ 17h no Development
+      //    Mode). Aqui NÃO adianta sondar de 20 em 20min: o ban só expira no reset, e cada
+      //    sondagem é chamada desperdiçada + spam de log. Recua 1h entre re-checks.
+      const isDailyBan = raRaw > 1200;
+      const retryAfter = Math.min(raRaw, isDailyBan ? 3600 : 1200);
       rateLimitedUntil = Date.now() + retryAfter * 1000;
-      console.warn(`⏸  Rate limit Spotify — pausando por ${retryAfter}s${raRaw > 1200 ? ` (retry-after real ${raRaw}s limitado a 1200s)` : ''}`);
+      if (isDailyBan)
+        console.warn(`⛔ Spotify: BAN DE COTA DIÁRIA — retry-after real ${raRaw}s (~${(raRaw/3600).toFixed(1)}h). Só volta no reset; re-checando em ${Math.round(retryAfter/60)}min.`);
+      else
+        console.warn(`⏸  Rate limit Spotify — pausando por ${retryAfter}s`);
     }
     // Retry com backoff exponencial para erros 5xx transitórios (502, 503, 504)
     if (retries > 0 && err.response?.status >= 500) {
