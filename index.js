@@ -3438,11 +3438,16 @@ async function acquireMediaFile(videoId, job) {
   //    (Para reativar, suba o plano do Render e descomente abaixo.)
   // const { path: p } = await downloadVideoWithPlaywright(videoId);
   // return { path: p, source: 'playwright' };
-  // Detecta se a falha do yt-dlp é por COOKIE/bot-check (falta cookie ou expirou) — o
-  // cliente usa isso pra oferecer a instalação da extensão Cat-Bot (que injeta os cookies).
-  const cookieLike = /cookie|sign in|not a bot|confirm you|authentication|403|login required|bot/i.test(ytdlpErr);
-  const err = new Error('análise real indisponível (yt-dlp falhou; Chromium desligado p/ economizar memória)');
-  if (cookieLike || !ytCookiesOk) err.needCookies = true;
+  // needCookies (→ tela "instale a extensão" no jogo) SÓ quando o servidor REALMENTE não
+  // tem cookies — ou seja, ninguém com a extensão Cat-Bot alimentou ainda. Se JÁ HÁ cookies
+  // (ytCookiesOk) e mesmo assim falhou, o problema NÃO é a extensão: é o YouTube bloqueando
+  // o IP da VPS (bot-check). Nesse caso NÃO adianta pedir pra instalar algo que já funciona;
+  // o cliente cai no ritmo estimado em silêncio. (ytdlpErr fica no log pra diagnóstico.)
+  console.warn(`🎵 análise real indisponível [${videoId}]: ${ytdlpErr.slice(-160)}`);
+  const err = new Error(ytCookiesOk
+    ? 'download bloqueado pelo YouTube (IP da VPS) — usando ritmo estimado'
+    : 'sem cookies do YouTube no servidor — instale a extensão Cat-Bot');
+  if (!ytCookiesOk) err.needCookies = true;
   throw err;
 }
 
