@@ -3418,13 +3418,14 @@ async function acquireMediaFile(videoId, job) {
     } catch (e) { console.warn(`🎵 cobalt falhou [${videoId}]: ${e.message}`); }
   }
   if (job) job.progress = 28;
+  let ytdlpErr = '';
   // 2. yt-dlp ÁUDIO puro (caminho principal — bestaudio quase sempre disponível)
   try { return await downloadAudioWithYtDlp(videoId); }
-  catch (e) { console.warn(`🎵 yt-dlp áudio falhou [${videoId}]: ${e.message}`); }
+  catch (e) { ytdlpErr = e.message || ''; console.warn(`🎵 yt-dlp áudio falhou [${videoId}]: ${e.message}`); }
   if (job) job.progress = 40;
   // 3. yt-dlp vídeo (caso o áudio puro falhe)
   try { const { path: p } = await downloadVideoWithYtDlp(videoId); return { path: p, source: 'yt-dlp' }; }
-  catch (e) { console.warn(`🎵 yt-dlp vídeo falhou [${videoId}]: ${e.message}`); }
+  catch (e) { ytdlpErr = e.message || ytdlpErr; console.warn(`🎵 yt-dlp vídeo falhou [${videoId}]: ${e.message}`); }
   if (job) job.progress = 50;
   // 4. Playwright/Chromium DESLIGADO no plano free do Render (512MB): abrir o
   //    Chromium estoura a memória e derruba o servidor. Sem áudio via yt-dlp, a
@@ -3432,7 +3433,12 @@ async function acquireMediaFile(videoId, job) {
   //    (Para reativar, suba o plano do Render e descomente abaixo.)
   // const { path: p } = await downloadVideoWithPlaywright(videoId);
   // return { path: p, source: 'playwright' };
-  throw new Error('análise real indisponível (yt-dlp falhou; Chromium desligado p/ economizar memória)');
+  // Detecta se a falha do yt-dlp é por COOKIE/bot-check (falta cookie ou expirou) — o
+  // cliente usa isso pra oferecer a instalação da extensão Cat-Bot (que injeta os cookies).
+  const cookieLike = /cookie|sign in|not a bot|confirm you|authentication|403|login required|bot/i.test(ytdlpErr);
+  const err = new Error('análise real indisponível (yt-dlp falhou; Chromium desligado p/ economizar memória)');
+  if (cookieLike || !ytCookiesOk) err.needCookies = true;
+  throw err;
 }
 
 // Decodifica qualquer mídia para PCM mono Float32 via ffmpeg
@@ -3599,14 +3605,14 @@ app.get('/api/uniko/beatmap/:videoId', async (req, res) => {
       console.log(`✓ beatmap ${videoId}: ${result.beats.length} batidas (${result.source})`);
       setTimeout(() => beatmapJobs.delete(videoId), 5 * 60 * 1000);
     }).catch((err) => {
-      job.status = 'error'; job.error = err.message;
-      console.error(`✗ beatmap falhou [${videoId}]: ${err.message}`);
+      job.status = 'error'; job.error = err.message; job.needCookies = !!err.needCookies;
+      console.error(`✗ beatmap falhou [${videoId}]: ${err.message}${err.needCookies ? ' (needCookies)' : ''}`);
       setTimeout(() => beatmapJobs.delete(videoId), 60 * 1000);
     });
   }
 
   if (job.status === 'ready') return res.json({ status: 'ready', cached: false, ...job.result });
-  if (job.status === 'error') return res.json({ status: 'error', error: job.error });
+  if (job.status === 'error') return res.json({ status: 'error', error: job.error, needCookies: !!job.needCookies });
   return res.json({ status: 'analyzing', progress: job.progress || 10 });
 });
 
