@@ -114,7 +114,10 @@ const app  = express();
 const PORT = process.env.PORT || 3001;
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
 app.options('*', cors());
-app.use(express.json());
+// Limite padrão do body-parser é 100kb — a Biblioteca Local manda a capa do
+// MP3 (extraída do ID3) como base64 dentro do JSON de POST /api/queue, e uma
+// capa embutida de tamanho normal já estoura isso sozinha (PayloadTooLargeError).
+app.use(express.json({ limit: '5mb' }));
 
 // ─── Supabase ────────────────────────────────────────────
 const supabase = createClient(
