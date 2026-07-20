@@ -2558,6 +2558,30 @@ async function syncExternalTrack(item) {
 
 async function monitorPlayback() {
   try {
+    // ── FAIXA LOCAL tocando: o Spotify NÃO tem autoridade nenhuma ──────────
+    // Uma faixa da Biblioteca Local vai pro Echo via SSML, sem tocar nada no
+    // Spotify. Mas o monitor continua vendo o ESTADO VELHO do Spotify (a faixa
+    // anterior, agora pausada/no fim) — sem este guard ele dispara "Música
+    // terminou" e chama advanceQueue, pulando a faixa local no mesmo instante
+    // em que ela começa (foi exatamente o que matou a reprodução no teste
+    // real: log "Música terminou ... avançando fila" logo depois do "Tocando
+    // (local)"). Numa faixa local, quem avança a fila é SÓ o timer
+    // agendarFimDaFaixaLocal — o Spotify fica totalmente fora do circuito.
+    const { data: playingNow } = await supabase
+      .from('queue').select('source').eq('status', 'playing').maybeSingle();
+    if (playingNow?.source === 'local') {
+      // Zera o rastreio do Spotify: quando a faixa local acabar e a próxima
+      // (Spotify) começar, o monitor não pode achar que "mudou de faixa"
+      // comparando com um lastKnownSpotifyId ancião nem herdar um progresso
+      // velho pra falsa detecção de fim.
+      lastKnownSpotifyId = null;
+      lastQueueSongId    = null;
+      nearEndTriggered   = false;
+      wasPlaying         = false;
+      lastProgressMs     = 0;
+      return false;
+    }
+
     const r = await spotify('get', '/me/player/currently-playing');
 
     // ── 204 / nada tocando ────────────────────────────────
