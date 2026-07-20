@@ -1530,8 +1530,15 @@ app.get('/api/search', async (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.post('/api/queue', async (req, res) => {
-  const { uri, spotify_id, title, artist, album_art, requested_by, duration_ms, duration_str, is_admin } = req.body;
-  if (!uri || !title || !requested_by) return res.status(400).json({ error: 'Dados incompletos' });
+  const { uri, spotify_id, title, artist, album_art, requested_by, duration_ms, duration_str, is_admin, source, mp3_url } = req.body;
+  // Faixa da Biblioteca Local não tem uri/spotify_id — tem mp3_url e
+  // source:'local'; validação e vaga funcionam igual pros dois casos.
+  const isLocal = source === 'local';
+  if (isLocal) {
+    if (!mp3_url || !title || !requested_by) return res.status(400).json({ error: 'Dados incompletos' });
+  } else if (!uri || !title || !requested_by) {
+    return res.status(400).json({ error: 'Dados incompletos' });
+  }
 
   // ── Limite de 2 vagas por colaborador (admin é ilimitado) ──
   // Músicas >= 15 min ocupam 2 vagas; abaixo disso, 1 vaga.
@@ -1566,7 +1573,9 @@ app.post('/api/queue', async (req, res) => {
   const position = (max?.[0]?.position ?? -1) + 1;
 
   const { data, error } = await supabase.from('queue').insert({
-    spotify_uri: uri, spotify_id, title, artist, album_art,
+    spotify_uri: isLocal ? null : uri, spotify_id: isLocal ? null : spotify_id,
+    source: isLocal ? 'local' : 'spotify', mp3_url: isLocal ? mp3_url : null,
+    title, artist, album_art,
     requested_by, duration_ms, duration_str, position, status: 'pending',
   }).select().single();
 
@@ -2169,6 +2178,45 @@ async function wakeSpotifyViaAlexa(song) {
   return null;
 }
 
+// Toca uma faixa da BIBLIOTECA LOCAL no Echo Spot via SSML — o mesmo canal
+// que a Alexa usa pra "falar" (Alexa.Speak/Announcement), só que o SSML dela
+// aceita uma tag <audio src="..."> pra tocar um clipe hospedado numa URL.
+// LIMITAÇÃO CONHECIDA (não confirmada até testar num aparelho real): esse
+// canal foi pensado pra efeitos sonoros CURTOS dentro de um anúncio falado,
+// não pra tocar uma música inteira — pode haver um teto de duração do lado
+// da Amazon que corta o áudio antes do fim.
+async function playLocalOnAlexa(song) {
+  if (!alexaOk) { console.error('❌ Alexa não conectada — não dá pra tocar a faixa local.'); return; }
+  const echoSerial = process.env.ALEXA_DEVICE_SERIAL
+    || alexaDevices.find(d => d.deviceFamily?.toLowerCase().includes('echo'))?.serialNumber;
+  if (!echoSerial) { console.error('❌ Nenhum Echo encontrado pra tocar a faixa local.'); return; }
+  const ssml = `<speak><audio src="${song.mp3_url}"/></speak>`;
+  await new Promise((resolve) => {
+    alexa.sendSequenceCommand(echoSerial, 'ssml', ssml, (err) => {
+      if (err) console.error('⚠️  playLocalOnAlexa falhou:', err.message || err);
+      resolve();   // resolve sempre — mesmo se der erro, a fila precisa continuar
+    });
+  });
+  console.log(`🎵 Tocando faixa LOCAL no Echo (SSML): ${song.title} — ${song.artist || ''}`);
+}
+
+// Avança a fila sozinha quando uma faixa LOCAL "termina" — o monitor que
+// detecta fim de música pergunta pro SPOTIFY o que está tocando, e uma
+// faixa local nunca aparece lá. Usa a duração conhecida (lida no upload,
+// via <audio>+loadedmetadata) como cronômetro. Confere se ainda é a MESMA
+// faixa tocando antes de avançar — se alguém já pulou manualmente antes do
+// timer disparar, não faz nada (evita pular 2x).
+function agendarFimDaFaixaLocal(song) {
+  const duracaoMs = Math.max(1000, song.duration_ms || 30000); // 30s de teto se a duração não foi salva
+  setTimeout(async () => {
+    try {
+      const { data: state } = await supabase.from('player_state').select('current_song_id').eq('id', 1).single();
+      if (state?.current_song_id !== song.id) return; // já avançou por outro caminho
+      await advanceQueue('auto');
+    } catch (e) { console.error('⚠️  agendarFimDaFaixaLocal:', e.message); }
+  }, duracaoMs);
+}
+
 // true durante TODA a troca de faixa (do início de startPlaying até o player_state
 // ser atualizado no fim) — cobre o gap de 800ms+ (transferência de device + chamadas
 // à API do Spotify) em que `player_state`/`progressCache` ainda apontam pra faixa
@@ -2192,6 +2240,24 @@ async function startPlaying(song) {
 async function _startPlayingInner(song) {
   // Marca música atual como tocada
   await supabase.from('queue').update({ status: 'played' }).eq('status', 'playing');
+
+  // Faixa da BIBLIOTECA LOCAL: não usa Spotify Connect nenhum — o MP3 vai
+  // direto pro Echo via SSML (ver playLocalOnAlexa) e a fila avança sozinha
+  // por um timer (agendarFimDaFaixaLocal), porque o monitor de "o que tá
+  // tocando" só enxerga o Spotify — uma faixa local nunca aparece lá, então
+  // ninguém mais ia perceber quando ela "termina".
+  if (song.source === 'local') {
+    await playLocalOnAlexa(song);
+    await supabase.from('queue').update({ status: 'playing' }).eq('id', song.id);
+    await supabase.from('player_state').upsert({
+      id: 1, is_playing: true, current_song_id: song.id, current_spotify_id: null,
+      updated_at: new Date().toISOString(),
+    });
+    await supabase.from('skip_votes').delete().eq('song_id', song.id);
+    agendarFimDaFaixaLocal(song);
+    console.log(`▶️  Tocando (local): ${song.title} — ${song.artist || ''}`);
+    return;
+  }
 
   // Dispositivo salvo
   const { data: devSetting } = await supabase
