@@ -2770,6 +2770,20 @@ const MONITOR_FAST_MS = 4000, MONITOR_IDLE_MS = 40000;
 async function monitorLoop() {
   let playing = false;
   try { playing = await monitorPlayback(); } catch {}
+  // Se o monitor NÃO confirmou "tocando" mas o banco ACHA que tem música tocando,
+  // mantém a cadência RÁPIDA mesmo assim. Sem isso, um blip transitório do Spotify
+  // (500/502/429/"Premium required" no meio de uma troca de dispositivo) fazia o
+  // monitorPlayback devolver false e o loop DORMIR 40s — e nesses 40s a música
+  // acabava, voltava pro começo (repeat) e/ou pausava, sem ninguém avançar a fila
+  // (foi exatamente o bug: "acabou, voltou pro 0:01 e pausou, tive que pular na
+  // mão"). Enquanto o banco diz is_playing=true, seguimos checando a cada 4s até
+  // pegar o estado real; só cai pros 40s ociosos quando de fato nada está tocando.
+  if (!playing) {
+    try {
+      const { data } = await supabase.from('player_state').select('is_playing').eq('id', 1).single();
+      if (data?.is_playing) playing = true;
+    } catch {}
+  }
   setTimeout(monitorLoop, playing ? MONITOR_FAST_MS : MONITOR_IDLE_MS);
 }
 monitorLoop();
