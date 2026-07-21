@@ -2324,6 +2324,13 @@ async function _startPlayingInner(song) {
     }
   }
 
+  // Garante que o Spotify NÃO esteja em repeat/shuffle. Com repeat-one ligado,
+  // a MESMA faixa toca pra sempre: o monitor nunca vê troca de faixa, a fila
+  // "trava" e a música fica repetindo até alguém pular na mão (bug reportado:
+  // "algumas músicas não pulam e repetem"). Fire-and-forget (não bloqueia o play).
+  spotify('put', '/me/player/repeat?state=off').catch(() => {});
+  spotify('put', '/me/player/shuffle?state=false').catch(() => {});
+
   // Atualiza estado no banco
   await supabase.from('queue').update({ status: 'playing' }).eq('id', song.id);
   await supabase.from('player_state').upsert({
@@ -2558,30 +2565,6 @@ async function syncExternalTrack(item) {
 
 async function monitorPlayback() {
   try {
-    // ── FAIXA LOCAL tocando: o Spotify NÃO tem autoridade nenhuma ──────────
-    // Uma faixa da Biblioteca Local vai pro Echo via SSML, sem tocar nada no
-    // Spotify. Mas o monitor continua vendo o ESTADO VELHO do Spotify (a faixa
-    // anterior, agora pausada/no fim) — sem este guard ele dispara "Música
-    // terminou" e chama advanceQueue, pulando a faixa local no mesmo instante
-    // em que ela começa (foi exatamente o que matou a reprodução no teste
-    // real: log "Música terminou ... avançando fila" logo depois do "Tocando
-    // (local)"). Numa faixa local, quem avança a fila é SÓ o timer
-    // agendarFimDaFaixaLocal — o Spotify fica totalmente fora do circuito.
-    const { data: playingNow } = await supabase
-      .from('queue').select('source').eq('status', 'playing').maybeSingle();
-    if (playingNow?.source === 'local') {
-      // Zera o rastreio do Spotify: quando a faixa local acabar e a próxima
-      // (Spotify) começar, o monitor não pode achar que "mudou de faixa"
-      // comparando com um lastKnownSpotifyId ancião nem herdar um progresso
-      // velho pra falsa detecção de fim.
-      lastKnownSpotifyId = null;
-      lastQueueSongId    = null;
-      nearEndTriggered   = false;
-      wasPlaying         = false;
-      lastProgressMs     = 0;
-      return false;
-    }
-
     const r = await spotify('get', '/me/player/currently-playing');
 
     // ── 204 / nada tocando ────────────────────────────────
@@ -2638,8 +2621,12 @@ async function monitorPlayback() {
         //    a fila mesmo faltando 2min36s de música).
         const remainingAtLastPoll = item.duration_ms - lastProgressMs;
         const nearEndNow          = remaining <= 12000;
+        // Limiar do último poll subiu de 8s → 12s: com o poll de 4s, o último tick
+        // tocando pode cair a até ~12s do fim numa cadência ruim, e aí a música
+        // acabava e ficava PAUSADA sem o monitor perceber (o usuário tinha que ir
+        // despausar + pular na mão). 12s ainda é longe do "pausa manual no meio".
         const songEndedNaturally  = remaining <= 3000
-                                 || (lastProgressMs > 0 && remainingAtLastPoll <= 8000)
+                                 || (lastProgressMs > 0 && remainingAtLastPoll <= 12000)
                                  || (nearEndTriggered && nearEndNow);
 
         if (songEndedNaturally) {
@@ -2664,9 +2651,31 @@ async function monitorPlayback() {
     }
 
     // ── Tocando ───────────────────────────────────────────
+    const prevProgress = lastProgressMs; // progresso do tick anterior (mesma faixa)
     wasPlaying     = true;
     lastProgressMs = progress_ms;
     progressCache  = { data: { progress_ms, is_playing: true }, at: Date.now() };
+
+    // ── Repeat/loop: MESMA faixa, mas o progresso VOLTOU do fim pro começo ──
+    // Se a faixa não mudou (mesmo spotifyId) mas o progresso pulou pra trás — de
+    // perto do fim pra perto do início —, a música ACABOU e reiniciou (repeat do
+    // Spotify) em vez de avançar. O `!==` de faixa nunca dispara nesse caso, então
+    // a fila ficava presa repetindo. Rede de segurança além do repeat=off: trata
+    // como fim e avança. Condições estreitas pra não confundir com seek manual.
+    if (lastKnownSpotifyId === spotifyId && prevProgress > 0) {
+      const estavaPertoDoFim = (item.duration_ms - prevProgress) <= 15000;
+      const voltouProComeco  = progress_ms <= 8000 && (prevProgress - progress_ms) > 20000;
+      if (estavaPertoDoFim && voltouProComeco) {
+        console.log(`🔁 Faixa reiniciou (repeat) — avançando fila... ("${item.name}")`);
+        spotify('put', '/me/player/repeat?state=off').catch(() => {}); // desliga de novo, por garantia
+        nearEndTriggered   = false;
+        lastKnownSpotifyId = null;
+        lastQueueSongId    = null;
+        lastProgressMs     = 0;
+        await advanceQueue('auto');
+        return false;
+      }
+    }
 
     // ── Nova faixa detectada no Spotify ───────────────────
     if (lastKnownSpotifyId !== spotifyId) {
