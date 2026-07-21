@@ -600,7 +600,9 @@ app.get('/api/auth/profile', requireAuth, async (req, res) => {
 });
 
 app.patch('/api/auth/profile', requireAuth, async (req, res) => {
-  const allowed = ['email','phone','street','district','city','state','cep'];
+  // rg/birth_date agora sao editaveis pelo proprio colaborador (Portal → Seus
+  // Dados). Nome e CPF continuam so pelo RH (identidade).
+  const allowed = ['email','phone','street','district','city','state','cep','rg','birth_date'];
   const updates = {};
   allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
   const { error } = await supabase.from('employees').update(updates).eq('id', req.user.id);
