@@ -2619,6 +2619,12 @@ async function monitorPlayback() {
         //    rede/handoff de dispositivo) caía aqui e cortava a música no meio; visto
         //    ao vivo num log real: remaining=156186ms com nearEndTriggered=true avançou
         //    a fila mesmo faltando 2min36s de música).
+        // `lastProgressMs`/`nearEndTriggered` só valem se a faixa PAUSADA é a MESMA
+        // que estava tocando — senão é lixo de outra faixa (visto no log real:
+        // remaining=269680ms com lastPoll=0ms, porque o lastProgressMs era do fim
+        // de OUTRA faixa). Sem esse guard, uma faixa nova pausada no comecinho podia
+        // ser pulada na hora à toa.
+        const sameTrack           = spotifyId === lastKnownSpotifyId;
         const remainingAtLastPoll = item.duration_ms - lastProgressMs;
         const nearEndNow          = remaining <= 12000;
         // Limiar do último poll subiu de 8s → 12s: com o poll de 4s, o último tick
@@ -2626,8 +2632,8 @@ async function monitorPlayback() {
         // acabava e ficava PAUSADA sem o monitor perceber (o usuário tinha que ir
         // despausar + pular na mão). 12s ainda é longe do "pausa manual no meio".
         const songEndedNaturally  = remaining <= 3000
-                                 || (lastProgressMs > 0 && remainingAtLastPoll <= 12000)
-                                 || (nearEndTriggered && nearEndNow);
+                                 || (sameTrack && lastProgressMs > 0 && remainingAtLastPoll <= 12000)
+                                 || (sameTrack && nearEndTriggered && nearEndNow);
 
         if (songEndedNaturally) {
           console.log(`🎵 Música terminou (remaining=${remaining}ms, lastPoll=${remainingAtLastPoll}ms, nearEnd=${nearEndTriggered}) — avançando fila...`);
