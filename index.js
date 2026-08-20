@@ -469,6 +469,96 @@ async function checkCaptureUnikoSpawn() {
 }
 setInterval(checkCaptureUnikoSpawn, 5000);
 
+// ── Uniko FIT: notificação PUSH no celular (comentário/reação no seu
+// check-in + mensagem de texto nova no Bate-Papo), mesmo com o app fechado.
+// O client só REGISTRA a inscrição (tabela uniko_fit_push_subscriptions,
+// direto do navegador via Supabase) — quem manda o push de verdade é aqui,
+// via polling (mesmo padrão do resto deste arquivo: sem depender de um
+// worker separado nem manter uma conexão de realtime aberta 24/7).
+// Precisa de VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY no .env (gerar 1x com
+// `npx web-push generate-vapid-keys`) — sem isso, essa parte fica inerte.
+const webpush = require('web-push');
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:contato@centraluniko.com.br', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+} else {
+  console.warn('⚠️  Uniko FIT push: VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY ausentes no .env — notificação push desativada.');
+}
+
+// Manda pra TODOS os dispositivos inscritos de uma pessoa; endpoint que
+// devolver 404/410 (expirado/revogado) é removido do banco na hora.
+const unikoFitPushSend = async (subs, payload) => {
+  const body = JSON.stringify(payload);
+  for (const s of subs) {
+    try {
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, body);
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) {
+        await supabase.from('uniko_fit_push_subscriptions').delete().eq('endpoint', s.endpoint);
+      } else {
+        console.warn('⚠️  Uniko FIT push falhou:', e.statusCode, e.message);
+      }
+    }
+  }
+};
+const unikoFitPushToPlayer = async (player, payload) => {
+  const { data: subs } = await supabase.from('uniko_fit_push_subscriptions').select('endpoint,p256dh,auth').eq('player', player);
+  if (subs?.length) await unikoFitPushSend(subs, payload);
+};
+const unikoFitPushToAllExcept = async (excludePlayer, payload) => {
+  const { data: subs } = await supabase.from('uniko_fit_push_subscriptions').select('endpoint,p256dh,auth').neq('player', excludePlayer);
+  if (subs?.length) await unikoFitPushSend(subs, payload);
+};
+
+// 1ª passada só marca o "último id visto" (não reenvia o histórico inteiro
+// toda vez que o servidor reinicia) — mesma lógica de baseline já usada no
+// polling de fallback das notificações do App.jsx (client).
+let unikoFitPushBaseline = true;
+let unikoFitLastComment = 0, unikoFitLastReaction = 0, unikoFitLastChat = 0;
+
+const pollUnikoFitPush = async () => {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const [{ data: coms }, { data: reacs }, { data: chats }] = await Promise.all([
+      supabase.from('uniko_fit_comments').select('id,checkin_id,player,texto').gt('id', unikoFitLastComment).order('id', { ascending: true }).limit(50),
+      supabase.from('uniko_fit_reactions').select('id,checkin_id,player,emoji').gt('id', unikoFitLastReaction).order('id', { ascending: true }).limit(50),
+      supabase.from('uniko_fit_chat').select('id,player,tipo,texto').gt('id', unikoFitLastChat).order('id', { ascending: true }).limit(50),
+    ]);
+    if (coms?.length)  unikoFitLastComment  = coms[coms.length - 1].id;
+    if (reacs?.length) unikoFitLastReaction = reacs[reacs.length - 1].id;
+    if (chats?.length) unikoFitLastChat     = chats[chats.length - 1].id;
+    if (unikoFitPushBaseline) { unikoFitPushBaseline = false; return; }
+
+    // Comentário/reação: avisa o DONO do check-in (não quem comentou/reagiu).
+    const checkinIds = [...new Set([...(coms || []).map(c => c.checkin_id), ...(reacs || []).map(r => r.checkin_id)])];
+    let donoPorCheckin = {};
+    if (checkinIds.length) {
+      const { data: checkins } = await supabase.from('uniko_fit_checkins').select('id,player').in('id', checkinIds);
+      (checkins || []).forEach(c => { donoPorCheckin[c.id] = c.player; });
+    }
+    for (const c of (coms || [])) {
+      const dono = donoPorCheckin[c.checkin_id];
+      if (!dono || dono === c.player) continue;
+      await unikoFitPushToPlayer(dono, { title: `💬 ${c.player.split(' ')[0]} comentou`, body: (c.texto || '').slice(0, 120), tag: 'uniko-fit', url: '/' });
+    }
+    for (const r of (reacs || [])) {
+      const dono = donoPorCheckin[r.checkin_id];
+      if (!dono || dono === r.player) continue;
+      await unikoFitPushToPlayer(dono, { title: `${r.emoji || '💪'} ${r.player.split(' ')[0]} curtiu sua foto`, body: 'Uniko FIT', tag: 'uniko-fit', url: '/' });
+    }
+    // Bate-Papo: só mensagem de TEXTO de verdade (não check-in/imagem/áudio) — avisa todo mundo, menos quem mandou.
+    for (const m of (chats || [])) {
+      if (m.tipo !== 'texto' || !m.texto?.trim()) continue;
+      await unikoFitPushToAllExcept(m.player, { title: `💬 ${m.player.split(' ')[0]} no Bate-Papo`, body: m.texto.slice(0, 120), tag: 'uniko-fit-chat', url: '/' });
+    }
+  } catch (e) {
+    console.error('⚠️  pollUnikoFitPush:', e.message);
+  }
+};
+setInterval(pollUnikoFitPush, 15000);
+pollUnikoFitPush();
+
 // ── Cron: verifica lembretes a cada minuto (horário de Brasília) ──
 // Deduplicação via Set em memória — evita depender de last_triggered no banco.
 const firedReminders = new Set();
