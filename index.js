@@ -548,6 +548,17 @@ function requireAdmin(req, res, next) {
     next();
   });
 }
+// Admin OU moderador — usado nas rotas de funcionários que o Dashboard RH já
+// libera pro moderador no cliente (abas Funcionários / Gerenciar Usuários /
+// Informações Pessoais). Sem isso, o servidor barrava com 403 e a lista de
+// colaboradores aparecia vazia pra quem é moderador (cliente já deixava entrar
+// na aba, mas a chamada à API sempre falhava).
+function requireAdminOrModerador(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== 'admin' && req.user.role !== 'moderador') return res.status(403).json({ error: 'Acesso restrito a administradores/moderadores' });
+    next();
+  });
+}
 
 // ═══════════════════════════════════════════════════════
 // SETUP — Cria o primeiro admin (só funciona se DB vazio)
@@ -631,21 +642,30 @@ app.get('/api/team', requireAuth, async (req, res) => {
   res.json({ employees: data });
 });
 
-// FUNCIONÁRIOS — CRUD (admin only)
+// FUNCIONÁRIOS — CRUD (admin + moderador — ver requireAdminOrModerador)
 // ═══════════════════════════════════════════════════════
 
-app.get('/api/employees', requireAdmin, async (req, res) => {
+// Moderador não pode mexer em conta de ADMIN (editar, trocar senha, desativar)
+// nem promover ninguém (incl. si mesmo) a admin — o Dashboard RH já libera as
+// abas de gerenciamento pro moderador, mas isso é o limite de confiança dele.
+async function employeeIsAdmin(id) {
+  const { data } = await supabase.from('employees').select('role').eq('id', id).maybeSingle();
+  return data?.role === 'admin';
+}
+
+app.get('/api/employees', requireAdminOrModerador, async (req, res) => {
   const { data, error } = await supabase.from('employees').select('id,name,cpf,role,cargo,active,created_at,updated_at').order('name');
   if (error) return res.status(500).json({ error: error.message });
   res.json({ employees: data.map(e => ({ ...e, cpf: maskCpf(e.cpf) })) });
 });
 
-app.post('/api/employees', requireAdmin, async (req, res) => {
+app.post('/api/employees', requireAdminOrModerador, async (req, res) => {
   const { name: n, cpf: rc, role = 'employee', cargo = '', password } = req.body;
   const name = (n || '').trim();
   const cpf  = normCpf(rc);
   if (!name)             return res.status(400).json({ error: 'Nome obrigatório' });
   if (cpf.length !== 11) return res.status(400).json({ error: 'CPF deve ter 11 dígitos' });
+  if (req.user.role === 'moderador' && role === 'admin') return res.status(403).json({ error: 'Moderador não pode criar administrador' });
   const password_hash = await bcrypt.hash(normCpf(password || cpf), 10);
   const { data, error } = await supabase.from('employees').insert({ name, cpf, password_hash, role, cargo: cargo.trim(), active: true }).select('id,name,cpf,role,cargo,active,created_at').single();
   if (error) {
@@ -656,8 +676,12 @@ app.post('/api/employees', requireAdmin, async (req, res) => {
   res.json({ employee: { ...data, cpf: maskCpf(data.cpf) } });
 });
 
-app.put('/api/employees/:id', requireAdmin, async (req, res) => {
+app.put('/api/employees/:id', requireAdminOrModerador, async (req, res) => {
   const { name, role, cargo, active } = req.body;
+  if (req.user.role === 'moderador') {
+    if (role === 'admin') return res.status(403).json({ error: 'Moderador não pode promover a administrador' });
+    if (await employeeIsAdmin(req.params.id)) return res.status(403).json({ error: 'Moderador não pode editar um administrador' });
+  }
   const u = { updated_at: new Date().toISOString() };
   if (name   !== undefined) u.name   = name.trim();
   if (role   !== undefined) u.role   = role;
@@ -668,9 +692,10 @@ app.put('/api/employees/:id', requireAdmin, async (req, res) => {
   res.json({ employee: { ...data, cpf: maskCpf(data.cpf) } });
 });
 
-app.put('/api/employees/:id/password', requireAdmin, async (req, res) => {
+app.put('/api/employees/:id/password', requireAdminOrModerador, async (req, res) => {
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'Senha obrigatória' });
+  if (req.user.role === 'moderador' && await employeeIsAdmin(req.params.id)) return res.status(403).json({ error: 'Moderador não pode redefinir a senha de um administrador' });
   const password_hash = await bcrypt.hash(normCpf(password) || password, 10);
   const { error } = await supabase.from('employees').update({ password_hash, updated_at: new Date().toISOString() }).eq('id', req.params.id);
   if (error) return res.status(500).json({ error: error.message });
@@ -688,8 +713,8 @@ app.get('/api/auth/salary-history', requireAuth, async (req, res) => {
   res.json({ history: data || [] });
 });
 
-// Histórico salarial de um funcionário (admin)
-app.get('/api/employees/:id/salary-history', requireAdmin, async (req, res) => {
+// Histórico salarial de um funcionário (admin + moderador)
+app.get('/api/employees/:id/salary-history', requireAdminOrModerador, async (req, res) => {
   const { data, error } = await supabase
     .from('salary_history').select('*').eq('employee_id', req.params.id)
     .order('created_at', { ascending: true });
@@ -698,9 +723,10 @@ app.get('/api/employees/:id/salary-history', requireAdmin, async (req, res) => {
 });
 
 // Adicionar registro manual de histórico salarial
-app.post('/api/employees/:id/salary-history', requireAdmin, async (req, res) => {
+app.post('/api/employees/:id/salary-history', requireAdminOrModerador, async (req, res) => {
   const { salary, event, date } = req.body;
   if (!salary) return res.status(400).json({ error: 'Salário obrigatório' });
+  if (req.user.role === 'moderador' && await employeeIsAdmin(req.params.id)) return res.status(403).json({ error: 'Moderador não pode editar salário de um administrador' });
   const months = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
   const now = new Date();
   const dateStr = date || `${months[now.getMonth()]}/${String(now.getFullYear()).slice(2)}`;
@@ -714,16 +740,20 @@ app.post('/api/employees/:id/salary-history', requireAdmin, async (req, res) => 
   res.json({ record: data });
 });
 
-// Buscar perfil completo de um funcionário (admin)
-app.get('/api/employees/:id', requireAdmin, async (req, res) => {
+// Buscar perfil completo de um funcionário (admin + moderador)
+app.get('/api/employees/:id', requireAdminOrModerador, async (req, res) => {
   const { data, error } = await supabase.from('employees').select('*').eq('id', req.params.id).single();
   if (error) return res.status(500).json({ error: error.message });
   const { password_hash, ...safe } = data;
   res.json({ employee: { ...safe, cpf: maskCpf(safe.cpf) } });
 });
 
-// Atualizar perfil completo (admin pode editar todos os campos)
-app.put('/api/employees/:id/profile', requireAdmin, async (req, res) => {
+// Atualizar perfil completo (admin edita tudo; moderador não mexe em conta de admin nem promove a admin)
+app.put('/api/employees/:id/profile', requireAdminOrModerador, async (req, res) => {
+  if (req.user.role === 'moderador') {
+    if (req.body.role === 'admin') return res.status(403).json({ error: 'Moderador não pode promover a administrador' });
+    if (await employeeIsAdmin(req.params.id)) return res.status(403).json({ error: 'Moderador não pode editar um administrador' });
+  }
   const allowed = ['name','role','active','rg','birth_date','email','phone','street','district',
     'city','state','cep','category','cargo','admission','salary','inss','ir','vt','va','dependents'];
   const u = { updated_at: new Date().toISOString() };
