@@ -1592,6 +1592,11 @@ const mapSearchTrack = t => ({
   album_art:    t.album.images[1]?.url || t.album.images[0]?.url || null,
   duration_ms:  t.duration_ms,
   duration_str: `${Math.floor(t.duration_ms / 60000)}:${String(Math.floor((t.duration_ms % 60000) / 1000)).padStart(2, '0')}`,
+  // Clipe de ~30s pra tocar direto no navegador (Uniko FIT — post com música,
+  // estilo TikTok). O Spotify vem restringindo isso: MUITAS faixas voltam
+  // `null` aqui (política deles, não dá pra contornar) — quem consome isso
+  // precisa tratar esse caso (ex.: avisar "sem prévia disponível").
+  preview_url:  t.preview_url || null,
 });
 
 // Faz a busca no Spotify (com dedup em voo + grava no cache). Lança em erro.
