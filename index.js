@@ -3903,6 +3903,60 @@ app.get('/api/uniko/beatmap/:videoId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// UNIKO FIT — extrair o áudio de um vídeo (música do post)
+// ═══════════════════════════════════════════════════════
+// O navegador do iPhone (Safari) não implementa `captureStream()`, então a
+// extração client-side (ver MusicPicker no crescent-hub) é IMPOSSÍVEL lá.
+// Aqui o vídeo sobe pra cá e o ffmpeg — que este servidor já garante em
+// `ensureFfmpeg()` pro yt-dlp — extrai o áudio de verdade e devolve um mp3.
+// Funciona em qualquer aparelho e ainda sai melhor que a versão do navegador
+// (que gravava em tempo real, limitada a 60s e em webm/opus).
+const fitAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 150 * 1024 * 1024 },   // 150MB — vídeo de celular cabe folgado
+});
+const FIT_AUDIO_MAX_S = 300;                  // corta em 5min (a pessoa usa só um trechinho)
+
+app.post('/api/uniko-fit/extrair-audio', fitAudioUpload.single('video'), async (req, res) => {
+  if (!req.file?.buffer?.length) return res.status(400).json({ error: 'Nenhum vídeo enviado.' });
+  if (!ffmpegReady) return res.status(503).json({ error: 'Conversor ainda iniciando no servidor — tente de novo em alguns segundos.' });
+
+  const ffmpegBin = FFMPEG_LOCATION ? `${FFMPEG_LOCATION}/ffmpeg` : 'ffmpeg';
+  const tag = `fit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const inPath  = `/tmp/${tag}.in`;
+  const outPath = `/tmp/${tag}.mp3`;
+  const limpar = () => { for (const p of [inPath, outPath]) fs.unlink(p, () => {}); };
+
+  try {
+    fs.writeFileSync(inPath, req.file.buffer);
+    await new Promise((resolve, reject) => {
+      // -vn descarta o vídeo; -t corta em FIT_AUDIO_MAX_S; -q:a 4 = VBR ~165kbps
+      const proc = spawn(ffmpegBin, ['-y', '-i', inPath, '-vn', '-t', String(FIT_AUDIO_MAX_S), '-acodec', 'libmp3lame', '-q:a', '4', outPath]);
+      let stderr = '';
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        if (code === 0) return resolve();
+        // Sem trilha de áudio o ffmpeg falha com "does not contain any stream"
+        const semAudio = /does not contain any stream|Output file .* does not contain/i.test(stderr);
+        reject(new Error(semAudio ? 'Esse vídeo não tem áudio.' : `ffmpeg código ${code}: ${stderr.trim().slice(-300)}`));
+      });
+    });
+
+    const mp3 = fs.readFileSync(outPath);
+    if (!mp3.length) throw new Error('A conversão gerou um arquivo vazio.');
+    console.log(`🎵 Uniko FIT: áudio extraído (${req.file.size} bytes de vídeo → ${mp3.length} bytes de mp3)`);
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(mp3);
+  } catch (err) {
+    console.error('✗ Uniko FIT extrair-audio:', err.message);
+    res.status(500).json({ error: err.message || 'Falha ao extrair o áudio.' });
+  } finally {
+    limpar();
+  }
+});
+
+// ═══════════════════════════════════════════════════════
 // START
 // ═══════════════════════════════════════════════════════
 
