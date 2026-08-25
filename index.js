@@ -1543,6 +1543,14 @@ app.get('/api/logs', requireAdmin, (req, res) => {
 let progressCache = { data: null, at: 0 };
 const PROGRESS_CACHE_MS = 5000; // reusa resultado por 5s (monitor renova a cada 4s tocando)
 
+// Quando o admin arrasta a barra de progresso (/api/player/seek), o progresso
+// pula pra trás ou pra frente de propósito. O monitorPlayback tem um detector
+// de "repeat" que interpreta um pulo grande PRA TRÁS como fim de música, então
+// arrastar do fim pro começo avançava a fila em vez de rebobinar. Este carimbo
+// dá uma trégua a esse detector logo depois de um seek manual.
+let ultimoSeekEm = 0;
+const SEEK_GRACA_MS = 20000;
+
 app.get('/api/progress', async (req, res) => {
   try {
     const now = Date.now();
@@ -1864,6 +1872,28 @@ app.post('/api/player/autoplay', requireAdmin, async (req, res) => {
   await supabase.from('settings').upsert({ key: 'autoplay_enabled', value: String(autoplayEnabled) }, { onConflict: 'key' });
   console.log(`🎵 Autoplay ${autoplayEnabled ? 'ativado ✅' : 'desativado 🚫'}`);
   res.json({ ok: true, enabled: autoplayEnabled });
+});
+
+// Pula pro ponto da música que o admin escolheu na barra de progresso (admin only)
+app.put('/api/player/seek', requireAdmin, async (req, res) => {
+  const position_ms = parseInt(req.query.position_ms ?? req.body?.position_ms);
+  if (isNaN(position_ms) || position_ms < 0)
+    return res.status(400).json({ error: 'position_ms deve ser um número >= 0' });
+  try {
+    await spotify('put', `/me/player/seek?position_ms=${position_ms}`);
+    // Sem atualizar o cache aqui, o frontend continuaria lendo o progresso
+    // ANTIGO por até PROGRESS_CACHE_MS e a barra "voltaria" sozinha logo
+    // depois de arrastada. `lastProgressMs` também precisa acompanhar, senão
+    // o próximo tick do monitor compara o novo progresso com o de antes do
+    // seek e acha que a música terminou.
+    progressCache  = { data: { progress_ms: position_ms, is_playing: true }, at: Date.now() };
+    lastProgressMs = position_ms;
+    ultimoSeekEm   = Date.now();
+    res.json({ ok: true, position_ms });
+  } catch (err) {
+    console.error('❌ Seek:', err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data?.error?.message || 'Erro ao pular pro ponto da música' });
+  }
 });
 
 // Ajuste de volume (admin only)
@@ -2795,7 +2825,7 @@ async function monitorPlayback() {
     // Spotify) em vez de avançar. O `!==` de faixa nunca dispara nesse caso, então
     // a fila ficava presa repetindo. Rede de segurança além do repeat=off: trata
     // como fim e avança. Condições estreitas pra não confundir com seek manual.
-    if (lastKnownSpotifyId === spotifyId && prevProgress > 0) {
+    if (lastKnownSpotifyId === spotifyId && prevProgress > 0 && (Date.now() - ultimoSeekEm) > SEEK_GRACA_MS) {
       const estavaPertoDoFim = (item.duration_ms - prevProgress) <= 15000;
       const voltouProComeco  = progress_ms <= 8000 && (prevProgress - progress_ms) > 20000;
       if (estavaPertoDoFim && voltouProComeco) {
