@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "alexa-remote2": "^8.0.4",
+    "alexa-remote2": "^8.1.1",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
