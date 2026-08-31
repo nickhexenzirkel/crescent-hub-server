@@ -624,13 +624,44 @@ cron.schedule('* * * * *', async () => {
 });
 console.log('⏰ Cron de lembretes iniciado (verifica a cada minuto)');
 
+// ── Acesso desabilitado (desligamento) ────────────────────
+// O JWT vale 7 dias e o requireAuth só o verifica localmente — sem esta checagem,
+// quem já estava logado continuaria entrando por uma semana depois de o RH
+// desabilitar o acesso. Cache de 30s pra não virar uma consulta por request
+// (a lista de bloqueados é minúscula: só quem foi desligado com corte de acesso).
+// Ver supabase_desligamento.sql. Enquanto a migration não roda, a coluna não
+// existe → ninguém bloqueado (o app segue funcionando como antes).
+let _blockedIds = new Set();
+let _blockedAt  = 0;
+const BLOCKED_TTL_MS = 30 * 1000;
+async function refreshBlocked() {
+  if (Date.now() - _blockedAt < BLOCKED_TTL_MS) return;
+  _blockedAt = Date.now();
+  try {
+    const { data, error } = await supabase.from('employees').select('id').eq('acesso_bloqueado', true);
+    if (error) throw error;
+    _blockedIds = new Set((data || []).map(e => String(e.id)));
+  } catch { _blockedIds = new Set(); }
+}
+// Chamado pelas rotas que mudam o bloqueio, pra o corte valer na hora (sem os 30s).
+function invalidateBlockedCache() { _blockedAt = 0; }
+
 // ── Middlewares de autenticação ───────────────────────────
 function requireAuth(req, res, next) {
   const h = req.headers.authorization || '';
   const t = h.startsWith('Bearer ') ? h.slice(7) : null;
   if (!t) return res.status(401).json({ error: 'Token não fornecido' });
-  try { req.user = jwt.verify(t, JWT_SECRET); next(); }
-  catch { res.status(401).json({ error: 'Token inválido ou expirado' }); }
+  let user;
+  try { user = jwt.verify(t, JWT_SECRET); }
+  catch { return res.status(401).json({ error: 'Token inválido ou expirado' }); }
+  req.user = user;
+  refreshBlocked()
+    .then(() => {
+      if (_blockedIds.has(String(user.id)))
+        return res.status(403).json({ error: 'Seu acesso ao Uniko foi desabilitado pelo RH.', code: 'ACCESS_DISABLED' });
+      next();
+    })
+    .catch(() => next());   // falha ao consultar o banco não pode derrubar quem está logado
 }
 function requireAdmin(req, res, next) {
   requireAuth(req, res, () => {
@@ -684,6 +715,12 @@ app.post('/api/auth/login', async (req, res) => {
   if (!emp) return res.status(401).json({ error: 'CPF não encontrado ou conta inativa' });
   const ok = await bcrypt.compare(password, emp.password_hash);
   if (!ok) return res.status(401).json({ error: 'Senha incorreta' });
+  // Acesso desabilitado no desligamento — checado DEPOIS da senha pra não virar
+  // um oráculo de "esse CPF existe" (ver supabase_desligamento.sql).
+  if (emp.acesso_bloqueado) {
+    console.log(`⛔ Login bloqueado: ${emp.name} (${maskCpf(cpf)}) — acesso desabilitado pelo RH`);
+    return res.status(403).json({ error: 'Seu acesso ao Uniko foi desabilitado pelo RH.', code: 'ACCESS_DISABLED' });
+  }
   const token = jwt.sign({ id: emp.id, name: emp.name, cpf: emp.cpf, role: emp.role }, JWT_SECRET, { expiresIn: '7d' });
   console.log(`🔐 Login: ${emp.name} (${maskCpf(cpf)}) — ${emp.role}`);
   res.json({ token, user: { id: emp.id, name: emp.name, cpf: emp.cpf, role: emp.role } });
@@ -723,11 +760,12 @@ app.put('/api/auth/change-password', requireAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════
 // Lista pública de colegas (qualquer colaborador autenticado)
 app.get('/api/team', requireAuth, async (req, res) => {
-  const { data, error } = await supabase
-    .from('employees')
-    .select('id,name,role,cargo,active,admission')
-    .eq('active', true)
-    .order('name');
+  // Desligado sai da lista de colegas (e de tudo que se apoia nela: Prisma
+  // Store, conquistas...). Se a migration do desligamento ainda não rodou, a
+  // coluna não existe → refaz a busca sem o filtro em vez de quebrar a tela.
+  const base = () => supabase.from('employees').select('id,name,role,cargo,active,admission').eq('active', true).order('name');
+  let { data, error } = await base().eq('desligado', false);
+  if (error?.code === '42703') ({ data, error } = await base());
   if (error) return res.status(500).json({ error: error.message });
   res.json({ employees: data });
 });
@@ -744,7 +782,11 @@ async function employeeIsAdmin(id) {
 }
 
 app.get('/api/employees', requireAdminOrModerador, async (req, res) => {
-  const { data, error } = await supabase.from('employees').select('id,name,cpf,role,cargo,active,created_at,updated_at').order('name');
+  const COLS_BASE = 'id,name,cpf,role,cargo,active,created_at,updated_at';
+  const COLS_DESL = COLS_BASE + ',desligado,desligamento_data,desligamento_motivo,acesso_bloqueado';
+  // Migration do desligamento ainda não rodada → cai nas colunas antigas.
+  let { data, error } = await supabase.from('employees').select(COLS_DESL).order('name');
+  if (error?.code === '42703') ({ data, error } = await supabase.from('employees').select(COLS_BASE).order('name'));
   if (error) return res.status(500).json({ error: error.message });
   res.json({ employees: data.map(e => ({ ...e, cpf: maskCpf(e.cpf) })) });
 });
@@ -845,7 +887,8 @@ app.put('/api/employees/:id/profile', requireAdminOrModerador, async (req, res) 
     if (await employeeIsAdmin(req.params.id)) return res.status(403).json({ error: 'Moderador não pode editar um administrador' });
   }
   const allowed = ['name','role','active','rg','birth_date','email','phone','street','district',
-    'city','state','cep','category','cargo','admission','salary','inss','ir','vt','va','dependents'];
+    'city','state','cep','category','cargo','admission','salary','inss','ir','vt','va','dependents',
+    'desligado','desligamento_data','desligamento_motivo','acesso_bloqueado'];
   const u = { updated_at: new Date().toISOString() };
   allowed.forEach(k => { if (req.body[k] !== undefined) u[k] = req.body[k]; });
 
@@ -874,8 +917,41 @@ app.put('/api/employees/:id/profile', requireAdminOrModerador, async (req, res) 
 
   const { data, error } = await supabase.from('employees').update(u).eq('id', req.params.id).select('*').single();
   if (error) return res.status(500).json({ error: error.message });
+  if (u.acesso_bloqueado !== undefined) invalidateBlockedCache();
   const { password_hash, ...safe } = data;
   res.json({ employee: { ...safe, cpf: maskCpf(safe.cpf) } });
+});
+
+// DESLIGAMENTO — Dashboard RH → Gerenciar Usuários → botão "Desligamento".
+// Duas chaves independentes (ver supabase_desligamento.sql):
+//   desligado        → sai do Ponto Eletrônico e do Portal (para de contabilizar
+//                      banco de horas, faltas e o resto), mas ainda pode entrar.
+//   acesso_bloqueado → não consegue mais entrar no Uniko (login barrado + sessão
+//                      já aberta derrubada no próximo request).
+app.put('/api/employees/:id/desligamento', requireAdminOrModerador, async (req, res) => {
+  if (req.user.role === 'moderador' && await employeeIsAdmin(req.params.id))
+    return res.status(403).json({ error: 'Moderador não pode desligar um administrador' });
+
+  const desligado = !!req.body.desligado;
+  const u = {
+    desligado,
+    desligamento_data:   desligado ? (req.body.desligamento_data || null) : null,
+    desligamento_motivo: desligado ? (req.body.desligamento_motivo || '') : null,
+    desligamento_por:    desligado ? req.user.name : null,
+    desligamento_em:     desligado ? new Date().toISOString() : null,
+    updated_at: new Date().toISOString(),
+  };
+  if (req.body.acesso_bloqueado !== undefined) u.acesso_bloqueado = !!req.body.acesso_bloqueado;
+
+  const { data, error } = await supabase.from('employees').update(u).eq('id', req.params.id)
+    .select('id,name,cpf,role,cargo,active,desligado,desligamento_data,desligamento_motivo,acesso_bloqueado').single();
+  if (error) {
+    if (error.code === '42703') return res.status(500).json({ error: 'Banco desatualizado: rode supabase_desligamento.sql no Supabase.' });
+    return res.status(500).json({ error: error.message });
+  }
+  invalidateBlockedCache();   // corte de acesso vale na hora, sem esperar o cache de 30s
+  console.log(`${desligado ? '📤 Desligado' : '↩️  Desligamento removido'}: ${data.name}${u.acesso_bloqueado ? ' (acesso bloqueado)' : ''} — por ${req.user.name}`);
+  res.json({ employee: { ...data, cpf: maskCpf(data.cpf) } });
 });
 
 // ════════════════════════════════════════════════════════
