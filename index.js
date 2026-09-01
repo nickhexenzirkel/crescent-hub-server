@@ -2580,6 +2580,132 @@ async function _startPlayingInner(song) {
   console.log(`▶️  Tocando: ${song.title} — ${song.artist}`);
 }
 
+// ═══════════════════════════════════════════════════════
+// FILTRO DE CONTEÚDO DO AUTOPLAY
+// O autoplay toca sozinho no escritório (ninguém escolheu),
+// então não pode soltar faixa marcada como explicit nem funk
+// pesado/putaria. Pedidos manuais NÃO passam por aqui — ali
+// alguém escolheu e responde pela escolha.
+// ═══════════════════════════════════════════════════════
+
+// Tira acento e caixa pra comparar "Putaria" e "putária" igual.
+const DIACRITICS = new RegExp('[\\u0300-\\u036f]', 'g');
+const normTxt = s => (s || '').toLowerCase().normalize('NFD').replace(DIACRITICS, '');
+
+// Compila os termos como palavra inteira (sem \b, que tropeça em acento e
+// em símbolo colado no termo).
+const asWordRegexes = list => list.map(w => new RegExp(`(^|[^a-z0-9])${w}([^a-z0-9]|$)`));
+
+// Palavrão/obscenidade — barra a faixa venha de onde vier.
+const BAD_WORDS = asWordRegexes([
+  'buceta', 'bucetinha', 'bucetao', 'xota', 'xoxota', 'xereca', 'perereca', 'ppk', 'pepeka',
+  'caralho', 'caralhos', 'porra', 'poha', 'piroca',
+  'foda', 'fodas', 'fodase', 'foder', 'fodendo', 'fodido', 'fodida', 'fudendo', 'fudeu',
+  'boquete', 'punheta', 'siririca', 'gozada', 'gozando', 'gozei',
+  'cu', 'cuzao', 'cuzinho', 'rabetao', 'anal',
+  'puta', 'putas', 'putao', 'putaria', 'putinha', 'putona', 'vadia', 'vadias',
+  'vagabunda', 'vagabundas', 'arrombado', 'arrombada', 'corno', 'cornos', 'chifrudo',
+  'merda', 'merdas', 'bosta', 'viado', 'viadinho', 'desgracado', 'desgracada',
+  'suruba', 'surubinha', 'orgia', 'porno', 'pornografia',
+  'fuck', 'fucks', 'fuckin', 'fucking', 'fucked', 'motherfucker', 'shit', 'bullshit',
+  'bitch', 'bitches', 'nigga', 'niggas', 'cunt', 'pussy', 'dick', 'blowjob', 'cum',
+  'whore', 'slut', 'asshole', 'horny',
+]);
+
+// Baixo calão "leve" — sozinho não condena (aparece em axé, pop, samba), mas
+// em faixa de funk brasileiro é o retrato do funk pesado que não pode tocar aqui.
+const FUNK_HOT_WORDS = asWordRegexes([
+  'novinha', 'novinhas', 'safada', 'safado', 'safadinha', 'safadinho', 'cachorra',
+  'piranha', 'bandida', 'gostosa', 'gostosinha',
+  'senta', 'sentada', 'sentadinha', 'sentando', 'sentadao', 'montada', 'montadinha',
+  'rebola', 'rebolando', 'quica', 'quicando', 'chupa', 'chupando', 'lambe', 'lambendo',
+  'mete', 'meter', 'metendo', 'botando', 'tomando',
+  'bumbum', 'bunda', 'bundao', 'popozuda', 'popozao', 'peitos', 'peitinho', 'bico do',
+  'gemido', 'gemidos', 'gemendo', 'gemer', 'sexo', 'sexy', 'transa', 'transar', 'transando',
+  'tchaka', 'grelo', 'siliconada',
+  'fuzil', 'trafico', 'pistola', 'proibidao', 'bandido', 'crime',
+]);
+
+// Subgêneros que já dizem tudo — bloqueia o artista inteiro.
+const HARD_GENRES = [
+  'mandelao', 'putaria', 'proibidao', 'bruxaria', 'funk 150', 'funk automotivo',
+  'funk mtg', 'sexy drill',
+];
+
+// "funk" que NÃO é funk brasileiro (James Brown & cia. seguem liberados).
+const NOT_BR_FUNK = ['p-funk', 'g funk', 'funk rock', 'funk metal', 'funk soul', 'jazz funk', 'funk jam'];
+
+const matchesAny = (txt, regexes) => regexes.some(re => re.test(txt));
+
+// Gêneros do artista ficam em cache — o autoplay repete muito os mesmos nomes.
+const artistGenreCache = new Map();
+
+async function getArtistGenres(ids) {
+  const missing = [...new Set(ids)].filter(id => id && !artistGenreCache.has(id));
+  for (let i = 0; i < missing.length; i += 50) {
+    const chunk = missing.slice(i, i + 50);
+    try {
+      const r = await spotify('get', `/artists?ids=${chunk.join(',')}`);
+      for (const a of (r.data?.artists || [])) {
+        if (a?.id) artistGenreCache.set(a.id, (a.genres || []).map(normTxt));
+      }
+    } catch { /* sem gênero: cai na heurística do "MC" abaixo */ }
+    for (const id of chunk) if (!artistGenreCache.has(id)) artistGenreCache.set(id, []);
+  }
+  const out = new Map();
+  for (const id of ids) out.set(id, artistGenreCache.get(id) || []);
+  return out;
+}
+
+// Recebe faixas cruas do Spotify e devolve só as que podem tocar sozinhas.
+async function filterAutoplayTracks(rawTracks) {
+  const list = (rawTracks || []).filter(t => t?.uri && t?.id);
+  if (list.length === 0) return [];
+
+  // 1) Flag oficial do Spotify + palavrão no título/artista/álbum.
+  const step1 = [];
+  let blocked = 0;
+  for (const t of list) {
+    const artistNames = (t.artists || []).map(a => a.name).join(' ');
+    const txt = normTxt(`${t.name} ${artistNames} ${t.album?.name || ''}`);
+    if (t.explicit || matchesAny(txt, BAD_WORDS)) { blocked++; continue; }
+    step1.push({ t, txt, artistNames: normTxt(artistNames) });
+  }
+  if (step1.length === 0) {
+    if (blocked) console.log(`🚫 Autoplay: ${blocked} faixa(s) barrada(s) pelo filtro de conteúdo`);
+    return [];
+  }
+
+  // 2) Gênero do artista — funk pesado sai, funk leve só passa limpo.
+  //    A cota diária do app Spotify é apertada, então não pedimos o gênero do
+  //    catálogo inteiro: só de quem levanta suspeita (termo quente no título ou
+  //    artista MC/DJ, que é como se chama praticamente todo funkeiro).
+  const isSuspect = x =>
+    matchesAny(x.txt, FUNK_HOT_WORDS) || /(^|[^a-z])(mc|dj)[\s.]/.test(x.artistNames);
+  const suspects  = step1.filter(isSuspect);
+  const genreMap  = suspects.length
+    ? await getArtistGenres(suspects.map(x => x.t.artists?.[0]?.id).filter(Boolean))
+    : new Map();
+
+  const out = [];
+  for (const x of step1) {
+    if (!isSuspect(x)) { out.push(x.t); continue; }
+    const genres = genreMap.get(x.t.artists?.[0]?.id) || [];
+    if (genres.some(g => HARD_GENRES.some(h => g.includes(h)))) { blocked++; continue; }
+
+    const isBrFunk =
+      genres.some(g => g.includes('funk') && !NOT_BR_FUNK.some(n => g.includes(n))) ||
+      // MC sem gênero cadastrado no Spotify é o caso clássico do funk de fundo de quintal
+      (genres.length === 0 && /(^|[^a-z])mc[\s.]/.test(x.artistNames));
+
+    if (isBrFunk && matchesAny(x.txt, FUNK_HOT_WORDS)) { blocked++; continue; }
+    out.push(x.t);
+  }
+
+  if (blocked) console.log(`🚫 Autoplay: ${blocked} faixa(s) barrada(s) pelo filtro de conteúdo`);
+  return out;
+}
+
 async function startAutoPlaylist() {
   if (!autoplayEnabled) {
     console.log('🚫 Autoplay desativado — fila ficará vazia.');
@@ -2591,9 +2717,9 @@ async function startAutoPlaylist() {
     // 1ª opção: top tracks do usuário (personalizado, não depreciado)
     try {
       const r = await spotify('get', '/me/top/tracks?limit=50&time_range=medium_term');
-      const pool = r.data?.items || [];
       // Embaralha para não tocar sempre na mesma ordem
-      tracks = pool.sort(() => Math.random() - 0.5).slice(0, 20);
+      const pool = (r.data?.items || []).sort(() => Math.random() - 0.5);
+      tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
     } catch {}
 
     // 2ª opção: histórico recente de reprodução
@@ -2601,27 +2727,31 @@ async function startAutoPlaylist() {
       try {
         const r = await spotify('get', '/me/player/recently-played?limit=50');
         const seen = new Set();
-        tracks = (r.data?.items || [])
+        const pool = (r.data?.items || [])
           .map(i => i.track)
           .filter(t => t && !seen.has(t.id) && seen.add(t.id))
-          .sort(() => Math.random() - 0.5)
-          .slice(0, 20);
+          .sort(() => Math.random() - 0.5);
+        tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
       } catch {}
     }
 
-    // 3ª opção: playlists em destaque no Brasil (não precisa de escopos extras)
+    // 3ª opção: playlists em destaque no Brasil (não precisa de escopos extras).
+    // Tenta até 3: se o filtro esvaziar uma, passa pra próxima.
     if (tracks.length === 0) {
       try {
         const r = await spotify('get', '/browse/featured-playlists?country=BR&limit=10&locale=pt_BR');
-        const playlists = (r.data?.playlists?.items || []).filter(p => p?.id);
-        if (playlists.length > 0) {
-          const chosen = playlists[Math.floor(Math.random() * playlists.length)];
+        const playlists = (r.data?.playlists?.items || [])
+          .filter(p => p?.id).sort(() => Math.random() - 0.5).slice(0, 3);
+        for (const chosen of playlists) {
           const tr = await spotify('get', `/playlists/${chosen.id}/tracks?limit=50&market=BR`);
-          tracks = (tr.data?.items || [])
+          const pool = (tr.data?.items || [])
             .map(i => i.track).filter(t => t?.uri)
-            .sort(() => Math.random() - 0.5)
-            .slice(0, 20);
-          console.log(`🎵 Autoplay: usando playlist "${chosen.name}"`);
+            .sort(() => Math.random() - 0.5);
+          tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
+          if (tracks.length > 0) {
+            console.log(`🎵 Autoplay: usando playlist "${chosen.name}"`);
+            break;
+          }
         }
       } catch {}
     }
