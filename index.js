@@ -2706,6 +2706,118 @@ async function filterAutoplayTracks(rawTracks) {
   return out;
 }
 
+// ═══════════════════════════════════════════════════════
+// AUTOPLAY GUIADO PELA MÁQUINA DO TEMPO
+// O autoplay não sorteia mais faixa genérica do Spotify: ele repete o que o
+// escritório realmente ouve. A Máquina do Tempo já agrega exatamente isso na
+// view maquina_monthly_songs (1 linha por mês+música, contando só horário
+// comercial, sem admin e sem play do próprio robô), então o pool sai de lá:
+// o top do mês corrente pesa mais, mas os meses anteriores continuam entrando
+// pra não virar rádio das mesmas 10 músicas.
+// ═══════════════════════════════════════════════════════
+
+const MAQUINA_TOP_PER_MONTH = 15;   // quantas músicas de cada mês entram no sorteio
+const MAQUINA_RECENT_SKIP   = 40;   // últimas faixas da fila que o sorteio evita repetir
+const MAQUINA_POOL_SIZE     = 24;   // candidatas sorteadas antes do filtro de conteúdo
+
+// Peso por idade do mês (0 = mês corrente): o que está em alta agora domina,
+// o resto do ano continua aparecendo de vez em quando.
+const maquinaMonthWeight = age => (age <= 0 ? 4 : age <= 2 ? 2 : 1);
+
+const monthKeyNow = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+// Quantos meses "YYYY-MM" está atrás do mês de referência.
+const monthsAgo = (key, refKey) => {
+  const [y, m]   = key.split('-').map(Number);
+  const [ry, rm] = refKey.split('-').map(Number);
+  return (ry * 12 + rm) - (y * 12 + m);
+};
+
+// Sorteio ponderado sem reposição — peso maior = mais chance, mas nada é garantido.
+function weightedSample(entries, n) {
+  const pool = entries.slice();
+  const out  = [];
+  while (pool.length && out.length < n) {
+    const total = pool.reduce((a, e) => a + e.weight, 0);
+    let r = Math.random() * total;
+    let idx = pool.length - 1;
+    for (let i = 0; i < pool.length; i++) {
+      r -= pool[i].weight;
+      if (r <= 0) { idx = i; break; }
+    }
+    out.push(pool.splice(idx, 1)[0]);
+  }
+  return out;
+}
+
+// Devolve faixas cruas do Spotify sorteadas entre as mais tocadas da Máquina do
+// Tempo. Vazio se a Máquina ainda não tem dados (ou o SQL dela não foi rodado).
+async function maquinaAutoplayTracks() {
+  // 1) Ranking mês a mês (a view já vem agregada; pagina porque o Supabase corta em 1000)
+  const rows = [];
+  for (let from = 0; from < 5000; from += 1000) {
+    const { data, error } = await supabase
+      .from('maquina_monthly_songs')
+      .select('month,spotify_id,title,plays')
+      .range(from, from + 999);
+    if (error) throw error;
+    if (!data?.length) break;
+    rows.push(...data);
+    if (data.length < 1000) break;
+  }
+  if (rows.length === 0) return [];
+
+  // 2) Top de cada mês vira peso por música (a mesma música em vários meses soma)
+  const byMonth = new Map();
+  for (const r of rows) {
+    if (!r.spotify_id || !r.month) continue;
+    if (!byMonth.has(r.month)) byMonth.set(r.month, []);
+    byMonth.get(r.month).push(r);
+  }
+  const refKey  = monthKeyNow();
+  const weights = new Map();
+  const titles  = new Map();
+  for (const [month, list] of byMonth) {
+    const w = maquinaMonthWeight(monthsAgo(month, refKey));
+    for (const r of list.sort((a, b) => b.plays - a.plays).slice(0, MAQUINA_TOP_PER_MONTH)) {
+      weights.set(r.spotify_id, (weights.get(r.spotify_id) || 0) + w * r.plays);
+      if (!titles.has(r.spotify_id)) titles.set(r.spotify_id, r.title);
+    }
+  }
+  if (weights.size === 0) return [];
+
+  // 3) Tira o que acabou de tocar — sem isso o hit do mês voltaria a cada rodada
+  const { data: recent } = await supabase
+    .from('queue').select('spotify_id')
+    .in('status', ['played', 'skipped', 'playing'])
+    .order('created_at', { ascending: false }).limit(MAQUINA_RECENT_SKIP);
+  const recentIds = new Set((recent || []).map(r => r.spotify_id).filter(Boolean));
+
+  const all   = [...weights].map(([id, weight]) => ({ id, weight }));
+  const fresh = all.filter(e => !recentIds.has(e.id));
+  // Catálogo pequeno (Máquina nova): melhor repetir do que ficar sem autoplay.
+  const picked = weightedSample(fresh.length ? fresh : all, MAQUINA_POOL_SIZE);
+  if (picked.length === 0) return [];
+
+  // 4) A view só guarda id/título — o resto (uri, duração, capa) vem do Spotify
+  const raw = [];
+  for (let i = 0; i < picked.length; i += 50) {
+    const ids = picked.slice(i, i + 50).map(e => e.id).join(',');
+    const r = await spotify('get', `/tracks?ids=${ids}&market=BR`);
+    raw.push(...(r.data?.tracks || []).filter(Boolean));
+  }
+
+  const tracks = await filterAutoplayTracks(raw);
+  if (tracks.length) {
+    const top = [...weights].sort((a, b) => b[1] - a[1])[0];
+    console.log(`🎵 Autoplay: pool da Máquina do Tempo — ${weights.size} música(s) de ${byMonth.size} mês(es), líder "${titles.get(top[0])}"`);
+  }
+  return tracks;
+}
+
 async function startAutoPlaylist() {
   if (!autoplayEnabled) {
     console.log('🚫 Autoplay desativado — fila ficará vazia.');
@@ -2714,15 +2826,24 @@ async function startAutoPlaylist() {
   try {
     let tracks = [];
 
-    // 1ª opção: top tracks do usuário (personalizado, não depreciado)
+    // 1ª opção: o que o escritório mais ouve (Máquina do Tempo)
     try {
-      const r = await spotify('get', '/me/top/tracks?limit=50&time_range=medium_term');
-      // Embaralha para não tocar sempre na mesma ordem
-      const pool = (r.data?.items || []).sort(() => Math.random() - 0.5);
-      tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
-    } catch {}
+      tracks = (await maquinaAutoplayTracks()).slice(0, 20);
+    } catch (err) {
+      console.warn('⚠️  Autoplay/Máquina do Tempo indisponível:', err.response?.data?.error?.message || err.message);
+    }
 
-    // 2ª opção: histórico recente de reprodução
+    // 2ª opção: top tracks do usuário (personalizado, não depreciado)
+    if (tracks.length === 0) {
+      try {
+        const r = await spotify('get', '/me/top/tracks?limit=50&time_range=medium_term');
+        // Embaralha para não tocar sempre na mesma ordem
+        const pool = (r.data?.items || []).sort(() => Math.random() - 0.5);
+        tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
+      } catch {}
+    }
+
+    // 3ª opção: histórico recente de reprodução
     if (tracks.length === 0) {
       try {
         const r = await spotify('get', '/me/player/recently-played?limit=50');
@@ -2735,7 +2856,7 @@ async function startAutoPlaylist() {
       } catch {}
     }
 
-    // 3ª opção: playlists em destaque no Brasil (não precisa de escopos extras).
+    // 4ª opção: playlists em destaque no Brasil (não precisa de escopos extras).
     // Tenta até 3: se o filtro esvaziar uma, passa pra próxima.
     if (tracks.length === 0) {
       try {
