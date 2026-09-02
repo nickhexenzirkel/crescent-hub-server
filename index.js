@@ -2757,11 +2757,15 @@ function weightedSample(entries, n) {
 // Tempo. Vazio se a Máquina ainda não tem dados (ou o SQL dela não foi rodado).
 async function maquinaAutoplayTracks() {
   // 1) Ranking mês a mês (a view já vem agregada; pagina porque o Supabase corta em 1000)
+  // (ordena de propósito: sem `order` a paginação do PostgREST não é estável e os
+  //  meses mais novos podem cair fora — foi exatamente o bug do "Por Mês" no portal)
   const rows = [];
-  for (let from = 0; from < 5000; from += 1000) {
+  for (let from = 0; from < 20000; from += 1000) {
     const { data, error } = await supabase
       .from('maquina_monthly_songs')
       .select('month,spotify_id,title,plays')
+      .order('month', { ascending: false })
+      .order('plays', { ascending: false })
       .range(from, from + 999);
     if (error) throw error;
     if (!data?.length) break;
