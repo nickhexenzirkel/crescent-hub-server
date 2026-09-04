@@ -2291,10 +2291,10 @@ const getPlaylistAllTracks = async (playlistId) => {
   return [...spotifyTracks, ...supabaseExtra];
 };
 
-// Central Alexa → aba "Playlist": usuário cola o link de QUALQUER playlist pública
-// do Spotify e vê a lista de faixas com botão de adicionar direto na fila, sem
-// precisar pesquisar música por música. Diferente de /api/playlists/:id/tracks
-// (que é pras playlists CRIADAS pelo Uniko, com extras salvos no Supabase).
+// Central Alexa → aba "Playlist": biblioteca compartilhada de playlists do Spotify
+// (qualquer um cola o link, fica salva pra TODOS verem — ver playlist_library no
+// Supabase). Diferente de /api/playlists/:id/tracks (que é pras playlists CRIADAS
+// pelo Uniko, com extras salvos separadamente).
 //
 // NÃO usa a API oficial do Spotify (spotify()) — desde nov/2024 o endpoint
 // GET /playlists/{id}/tracks devolve 403 Forbidden pra apps em Development Mode
@@ -2304,37 +2304,91 @@ const getPlaylistAllTracks = async (playlistId) => {
 // EMBED do Spotify (open.spotify.com/embed/playlist/{id}) — o mesmo widget que
 // qualquer site usa pra incorporar uma playlist — que serve a lista de faixas
 // sem autenticação nenhuma, via um JSON embutido no HTML (__NEXT_DATA__).
+function extractPlaylistId(url) {
+  const m = (url || '').match(/playlist[/:]([a-zA-Z0-9]+)/);
+  const id = m ? m[1] : (url || '').trim();
+  return /^[a-zA-Z0-9]{10,30}$/.test(id) ? id : null;
+}
+
+async function fetchEmbedPlaylist(playlistId) {
+  const { data: html } = await axios.get(`https://open.spotify.com/embed/playlist/${playlistId}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000,
+  });
+  const m = html.match(/__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+  const entity = m ? JSON.parse(m[1])?.props?.pageProps?.state?.data?.entity : null;
+  if (!entity || entity.type !== 'playlist') return null;
+
+  const image = entity.coverArt?.sources?.[0]?.url || null;
+  const tracks = (entity.trackList || [])
+    .filter(t => t.entityType === 'track' && t.uri)
+    .map(t => ({
+      id: t.uri.split(':').pop(), uri: t.uri,
+      title: t.title, artist: t.subtitle,
+      album_art: image, duration_ms: t.duration || 0,
+      duration_str: fmtMsTrack(t.duration || 0),
+    }));
+
+  return { name: entity.name, image, owner: entity.subtitle || null, tracks };
+}
+
 app.get('/api/playlist/link', requireAuth, async (req, res) => {
   const { url } = req.query;
   if (!url?.trim()) return res.status(400).json({ error: 'Cole o link da playlist' });
-
-  const m = url.match(/playlist[/:]([a-zA-Z0-9]+)/);
-  const playlistId = m ? m[1] : url.trim();
-  if (!/^[a-zA-Z0-9]{10,30}$/.test(playlistId)) return res.status(400).json({ error: 'Link de playlist inválido' });
+  const playlistId = extractPlaylistId(url);
+  if (!playlistId) return res.status(400).json({ error: 'Link de playlist inválido' });
 
   try {
-    const { data: html } = await axios.get(`https://open.spotify.com/embed/playlist/${playlistId}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000,
-    });
-    const m2 = html.match(/__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
-    const entity = m2 ? JSON.parse(m2[1])?.props?.pageProps?.state?.data?.entity : null;
-    if (!entity || entity.type !== 'playlist') return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
-
-    const image = entity.coverArt?.sources?.[0]?.url || null;
-    const tracks = (entity.trackList || [])
-      .filter(t => t.entityType === 'track' && t.uri)
-      .map(t => ({
-        id: t.uri.split(':').pop(), uri: t.uri,
-        title: t.title, artist: t.subtitle,
-        album_art: image, duration_ms: t.duration || 0,
-        duration_str: fmtMsTrack(t.duration || 0),
-      }));
-
-    res.json({ name: entity.name, image, owner: entity.subtitle || null, tracks });
+    const pl = await fetchEmbedPlaylist(playlistId);
+    if (!pl) return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
+    res.json(pl);
   } catch (err) {
     console.error('❌ /api/playlist/link:', err.response?.status || err.message);
     res.status(500).json({ error: 'Erro ao buscar a playlist' });
   }
+});
+
+// Biblioteca: lista todas as playlists já salvas por qualquer colaborador
+app.get('/api/playlist/library', requireAuth, async (req, res) => {
+  const { data, error } = await supabase.from('playlist_library')
+    .select('*').order('created_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ playlists: data || [] });
+});
+
+// Adiciona uma playlist à biblioteca (visível pra todos depois). Se já existir
+// (mesmo spotify_id), só devolve a que já está salva em vez de duplicar.
+app.post('/api/playlist/library', requireAuth, async (req, res) => {
+  const { url } = req.body;
+  if (!url?.trim()) return res.status(400).json({ error: 'Cole o link da playlist' });
+  const playlistId = extractPlaylistId(url);
+  if (!playlistId) return res.status(400).json({ error: 'Link de playlist inválido' });
+
+  try {
+    const { data: existing } = await supabase.from('playlist_library')
+      .select('*').eq('spotify_id', playlistId).maybeSingle();
+    if (existing) return res.json({ playlist: existing, alreadyExisted: true });
+
+    const pl = await fetchEmbedPlaylist(playlistId);
+    if (!pl) return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
+
+    const { data, error } = await supabase.from('playlist_library').insert({
+      spotify_id: playlistId, name: pl.name, image: pl.image, owner: pl.owner,
+      track_count: pl.tracks.length, added_by: req.user?.name || 'Colaborador',
+    }).select().single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ playlist: data, alreadyExisted: false });
+  } catch (err) {
+    console.error('❌ POST /api/playlist/library:', err.response?.status || err.message);
+    res.status(500).json({ error: 'Erro ao buscar a playlist' });
+  }
+});
+
+app.delete('/api/playlist/library/:spotifyId', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin' && req.user.role !== 'moderador')
+    return res.status(403).json({ error: 'Acesso restrito a administradores/moderadores' });
+  const { error } = await supabase.from('playlist_library').delete().eq('spotify_id', req.params.spotifyId);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
 });
 
 app.get('/api/playlists', requireAuth, async (req, res) => {
