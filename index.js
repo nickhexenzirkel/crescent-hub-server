@@ -2294,8 +2294,16 @@ const getPlaylistAllTracks = async (playlistId) => {
 // Central Alexa → aba "Playlist": usuário cola o link de QUALQUER playlist pública
 // do Spotify e vê a lista de faixas com botão de adicionar direto na fila, sem
 // precisar pesquisar música por música. Diferente de /api/playlists/:id/tracks
-// (que é pras playlists CRIADAS pelo Uniko, com extras salvos no Supabase) —
-// aqui é sempre lido direto do Spotify, sem tocar na tabela playlist_tracks.
+// (que é pras playlists CRIADAS pelo Uniko, com extras salvos no Supabase).
+//
+// NÃO usa a API oficial do Spotify (spotify()) — desde nov/2024 o endpoint
+// GET /playlists/{id}/tracks devolve 403 Forbidden pra apps em Development Mode
+// sem Extended Quota Mode, mesmo pra playlist do próprio dono da conta conectada
+// (confirmado testando: só a Extended Quota liberaria, e é um pedido formal de
+// organização que pode nem ser aprovado). Em vez disso, lê a página pública de
+// EMBED do Spotify (open.spotify.com/embed/playlist/{id}) — o mesmo widget que
+// qualquer site usa pra incorporar uma playlist — que serve a lista de faixas
+// sem autenticação nenhuma, via um JSON embutido no HTML (__NEXT_DATA__).
 app.get('/api/playlist/link', requireAuth, async (req, res) => {
   const { url } = req.query;
   if (!url?.trim()) return res.status(400).json({ error: 'Cole o link da playlist' });
@@ -2305,24 +2313,27 @@ app.get('/api/playlist/link', requireAuth, async (req, res) => {
   if (!/^[a-zA-Z0-9]{10,30}$/.test(playlistId)) return res.status(400).json({ error: 'Link de playlist inválido' });
 
   try {
-    const meta = await spotify('get', `/playlists/${playlistId}?fields=name,images,owner.display_name,tracks.total`);
-    const total = meta.data.tracks?.total || 0;
-    // Teto de 5 páginas (500 faixas) — playlist gigante não deve virar rajada de
-    // chamadas no Spotify (app já sofreu com bans de cota, ver hostinger-vps-deploy).
-    const pages = Math.max(1, Math.min(Math.ceil(total / 100), 5));
+    const { data: html } = await axios.get(`https://open.spotify.com/embed/playlist/${playlistId}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000,
+    });
+    const m2 = html.match(/__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
+    const entity = m2 ? JSON.parse(m2[1])?.props?.pageProps?.state?.data?.entity : null;
+    if (!entity || entity.type !== 'playlist') return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
 
-    const tracks = [];
-    for (let p = 0; p < pages; p++) {
-      const r = await spotify('get', `/playlists/${playlistId}/tracks?limit=100&offset=${p * 100}&market=BR`);
-      tracks.push(...(r.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean));
-    }
+    const image = entity.coverArt?.sources?.[0]?.url || null;
+    const tracks = (entity.trackList || [])
+      .filter(t => t.entityType === 'track' && t.uri)
+      .map(t => ({
+        id: t.uri.split(':').pop(), uri: t.uri,
+        title: t.title, artist: t.subtitle,
+        album_art: image, duration_ms: t.duration || 0,
+        duration_str: fmtMsTrack(t.duration || 0),
+      }));
 
-    res.json({ name: meta.data.name, image: meta.data.images?.[0]?.url || null, owner: meta.data.owner?.display_name || null, tracks });
+    res.json({ name: entity.name, image, owner: entity.subtitle || null, tracks });
   } catch (err) {
-    const status = err.response?.status;
-    if (status === 404) return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
-    console.error('❌ /api/playlist/link:', err.response?.data?.error?.message || err.message);
-    res.status(status || 500).json({ error: 'Erro ao buscar a playlist' });
+    console.error('❌ /api/playlist/link:', err.response?.status || err.message);
+    res.status(500).json({ error: 'Erro ao buscar a playlist' });
   }
 });
 
@@ -2382,24 +2393,6 @@ app.get('/api/debug/pl/:id', async (req, res) => {
     const r = await spotify('get', `/playlists/${req.params.id}`);
     res.json({ name: r.data.name, owner: r.data.owner?.id, total: r.data.tracks?.total });
   } catch (err) { res.json({ error: err.response?.data, status: err.response?.status }); }
-});
-
-// TEMP — investigando 403 do novo /api/playlist/link, remover depois.
-app.get('/api/debug/pl2/:id', async (req, res) => {
-  const out = {};
-  try {
-    const meta = await spotify('get', `/playlists/${req.params.id}?fields=name,images,owner.display_name,tracks.total`);
-    out.meta = { status: 200, data: meta.data };
-  } catch (err) { out.meta = { status: err.response?.status, error: err.response?.data }; }
-  try {
-    const tr = await spotify('get', `/playlists/${req.params.id}/tracks?limit=5&offset=0&market=BR`);
-    out.tracks = { status: 200, total: tr.data?.items?.length };
-  } catch (err) { out.tracks = { status: err.response?.status, error: err.response?.data }; }
-  try {
-    const tr2 = await spotify('get', `/playlists/${req.params.id}/tracks?limit=5&offset=0`);
-    out.tracksNoMarket = { status: 200, total: tr2.data?.items?.length };
-  } catch (err) { out.tracksNoMarket = { status: err.response?.status, error: err.response?.data }; }
-  res.json(out);
 });
 
 // Faixas do Spotify + extras do Supabase (POST/DELETE via Spotify restrito pós-nov/2024)
