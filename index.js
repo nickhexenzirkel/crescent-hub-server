@@ -2291,6 +2291,41 @@ const getPlaylistAllTracks = async (playlistId) => {
   return [...spotifyTracks, ...supabaseExtra];
 };
 
+// Central Alexa → aba "Playlist": usuário cola o link de QUALQUER playlist pública
+// do Spotify e vê a lista de faixas com botão de adicionar direto na fila, sem
+// precisar pesquisar música por música. Diferente de /api/playlists/:id/tracks
+// (que é pras playlists CRIADAS pelo Uniko, com extras salvos no Supabase) —
+// aqui é sempre lido direto do Spotify, sem tocar na tabela playlist_tracks.
+app.get('/api/playlist/link', requireAuth, async (req, res) => {
+  const { url } = req.query;
+  if (!url?.trim()) return res.status(400).json({ error: 'Cole o link da playlist' });
+
+  const m = url.match(/playlist[/:]([a-zA-Z0-9]+)/);
+  const playlistId = m ? m[1] : url.trim();
+  if (!/^[a-zA-Z0-9]{10,30}$/.test(playlistId)) return res.status(400).json({ error: 'Link de playlist inválido' });
+
+  try {
+    const meta = await spotify('get', `/playlists/${playlistId}?fields=name,images,owner.display_name,tracks.total`);
+    const total = meta.data.tracks?.total || 0;
+    // Teto de 5 páginas (500 faixas) — playlist gigante não deve virar rajada de
+    // chamadas no Spotify (app já sofreu com bans de cota, ver hostinger-vps-deploy).
+    const pages = Math.max(1, Math.min(Math.ceil(total / 100), 5));
+
+    const tracks = [];
+    for (let p = 0; p < pages; p++) {
+      const r = await spotify('get', `/playlists/${playlistId}/tracks?limit=100&offset=${p * 100}&market=BR`);
+      tracks.push(...(r.data?.items || []).map(i => mapTrack(i.track)).filter(Boolean));
+    }
+
+    res.json({ name: meta.data.name, image: meta.data.images?.[0]?.url || null, owner: meta.data.owner?.display_name || null, tracks });
+  } catch (err) {
+    const status = err.response?.status;
+    if (status === 404) return res.status(404).json({ error: 'Playlist não encontrada (ou é privada)' });
+    console.error('❌ /api/playlist/link:', err.response?.data?.error?.message || err.message);
+    res.status(status || 500).json({ error: 'Erro ao buscar a playlist' });
+  }
+});
+
 app.get('/api/playlists', requireAuth, async (req, res) => {
   try {
     const { data: playlists, error } = await supabase.from('playlists')
