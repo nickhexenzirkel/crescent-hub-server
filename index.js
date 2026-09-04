@@ -563,6 +563,63 @@ pollUnikoFitPush();
 // Deduplicação via Set em memória — evita depender de last_triggered no banco.
 const firedReminders = new Set();
 
+// Os 4 lembretes fixos de "bater o ponto" (cadastrados no Dashboard RH como
+// type='alexa') tinham mensagem estática — ficava repetitivo de ouvir todo
+// dia igual. Aqui a gente troca a fala por uma variação do dia (rotaciona
+// pelo dia do ano, então muda diariamente sem precisar editar nada no banco),
+// mantendo a mesma informação (lembrar de bater o ponto) e um tom amigável.
+function accentFold(s) {
+  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+}
+
+function dayOfYear(d) {
+  const start = new Date(d.getFullYear(), 0, 0);
+  return Math.floor((d - start) / 86400000);
+}
+
+const PONTO_MSG_POOLS = {
+  manha: (hora) => [
+    `Bom dia, equipe! Não se esqueçam de bater o ponto, são ${hora}.`,
+    `Bom dia a todos! Só lembrando: hora de bater o ponto, ${hora}.`,
+    `Oi, pessoal, bom dia! Dormiram bem? Não esqueçam de bater o ponto, ${hora}.`,
+    `Bom dia! Já são ${hora} — não esqueçam de bater o ponto antes de começar o dia.`,
+    `E aí, equipe, bom dia! Passando só pra lembrar do ponto, ${hora}.`,
+  ],
+  meio_dia: (hora) => [
+    `Bom apetite a todos! Antes de saírem para o almoço, não esqueçam de bater o ponto, são ${hora}.`,
+    `Hora do almoço chegando! Não se esqueçam de bater o ponto antes de sair, ${hora}.`,
+    `Pessoal, já são ${hora} — bom almoço a todos, mas antes bate o ponto, viu?`,
+    `Bom apetite, equipe! Só lembrando de bater o ponto antes da pausa, ${hora}.`,
+    `Já é hora do almoço! Não esqueçam do ponto antes de sair, são ${hora}.`,
+  ],
+  tarde: (hora) => [
+    `Boa tarde a todos, descansaram bem? Não se esqueçam de bater o ponto, são ${hora}.`,
+    `Boa tarde, pessoal! De volta do almoço, não esqueçam de bater o ponto, ${hora}.`,
+    `Boa tarde, equipe! Só lembrando de bater o ponto ao retornar, são ${hora}.`,
+    `Oi, boa tarde! Já bateram o ponto? São ${hora}, não esqueçam.`,
+    `Boa tarde a todos! Espero que o almoço tenha sido bom — não esqueçam do ponto, ${hora}.`,
+  ],
+  saida: (hora) => [
+    `Boa tarde a todos! Antes de saírem, não esqueçam de bater o ponto, são ${hora}.`,
+    `Fim de tarde chegando! Não esqueçam de bater o ponto antes de ir embora, ${hora}.`,
+    `Boa tarde, pessoal! Já é quase hora de ir, mas antes bate o ponto, são ${hora}.`,
+    `Pessoal, antes de encerrar o dia, não esqueçam do ponto, são ${hora}.`,
+    `Boa tarde a todos! Bom descanso pra vocês, mas antes não esqueçam de bater o ponto, são ${hora}.`,
+  ],
+};
+
+function pontoReminderMessage(r, today) {
+  const [hh, mm] = r.time.split(':').map(Number);
+  const targetHour = mm >= 30 ? (hh + 1) % 24 : hh;
+  let bucket, hora;
+  if (targetHour < 12)      { bucket = 'manha';    hora = `${targetHour} horas da manhã`; }
+  else if (targetHour === 12) { bucket = 'meio_dia'; hora = `${targetHour} horas`; }
+  else if (targetHour <= 14)  { bucket = 'tarde';     hora = `${targetHour} horas da tarde`; }
+  else                        { bucket = 'saida';     hora = `${targetHour} horas`; }
+  const pool = PONTO_MSG_POOLS[bucket](hora);
+  return pool[dayOfYear(today) % pool.length];
+}
+
 cron.schedule('* * * * *', async () => {
   try {
     const brt   = new Date(Date.now() - 3 * 60 * 60 * 1000);
@@ -598,10 +655,15 @@ cron.schedule('* * * * *', async () => {
 
       try {
         if (r.type === 'alexa') {
+          // Os lembretes de "bater o ponto" trocam de frase a cada dia (ver
+          // pontoReminderMessage) pra não soar repetitivo; os demais lembretes
+          // de Alexa falam a mensagem cadastrada normalmente.
+          const isPonto = r.time && accentFold(r.title).includes('ponto eletronico');
+          const msg = isPonto ? pontoReminderMessage(r, brt) : (r.message || r.title);
           // pauseMusic: pausa a música (se estiver tocando) pra garantir que o
           // lembrete seja ouvido bem, e retoma sozinho depois.
-          await speakOnAlexa(r.message || r.title, { sound: r.sound, device: r.alexa_device, pauseMusic: true });
-          console.log(`✅ Alexa anunciou: "${r.title}"`);
+          await speakOnAlexa(msg, { sound: r.sound, device: r.alexa_device, pauseMusic: true });
+          console.log(`✅ Alexa anunciou: "${r.title}"${isPonto ? ' (variação do dia)' : ''}`);
         } else if (r.type === 'personal') {
           // Lembrete pessoal: o cliente de cada usuário gerencia localmente.
           // Não inserir em notifications para não vazar para outros usuários via realtime.
