@@ -2384,6 +2384,24 @@ app.get('/api/debug/pl/:id', async (req, res) => {
   } catch (err) { res.json({ error: err.response?.data, status: err.response?.status }); }
 });
 
+// TEMP — investigando 403 do novo /api/playlist/link, remover depois.
+app.get('/api/debug/pl2/:id', async (req, res) => {
+  const out = {};
+  try {
+    const meta = await spotify('get', `/playlists/${req.params.id}?fields=name,images,owner.display_name,tracks.total`);
+    out.meta = { status: 200, data: meta.data };
+  } catch (err) { out.meta = { status: err.response?.status, error: err.response?.data }; }
+  try {
+    const tr = await spotify('get', `/playlists/${req.params.id}/tracks?limit=5&offset=0&market=BR`);
+    out.tracks = { status: 200, total: tr.data?.items?.length };
+  } catch (err) { out.tracks = { status: err.response?.status, error: err.response?.data }; }
+  try {
+    const tr2 = await spotify('get', `/playlists/${req.params.id}/tracks?limit=5&offset=0`);
+    out.tracksNoMarket = { status: 200, total: tr2.data?.items?.length };
+  } catch (err) { out.tracksNoMarket = { status: err.response?.status, error: err.response?.data }; }
+  res.json(out);
+});
+
 // Faixas do Spotify + extras do Supabase (POST/DELETE via Spotify restrito pós-nov/2024)
 app.get('/api/playlists/:id/tracks', requireAuth, async (req, res) => {
   try {
