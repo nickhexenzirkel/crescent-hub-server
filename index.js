@@ -2327,8 +2327,13 @@ function extractPlaylistId(url) {
 }
 
 async function fetchEmbedPlaylist(playlistId) {
+  // User-Agent completo de propósito: um "Mozilla/5.0" pelado é a marca
+  // registrada de script/bot, e IP de VPS (data center) já é mais suspeito
+  // que IP residencial — dar uma UA de navegador de verdade reduz a chance
+  // de cair em bloqueio/desafio anti-bot do Spotify.
   const { data: html } = await axios.get(`https://open.spotify.com/embed/playlist/${playlistId}`, {
-    headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
+    timeout: 10000,
   });
   const m = html.match(/__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s);
   const entity = m ? JSON.parse(m[1])?.props?.pageProps?.state?.data?.entity : null;
@@ -3033,18 +3038,23 @@ async function fetchTracksByIds(ids) {
 async function libraryAutoplayTracks() {
   const { data: playlists, error } = await supabase.from('playlist_library').select('spotify_id,name');
   if (error) throw error;
-  if (!playlists?.length) return [];
+  if (!playlists?.length) { console.log('🎵 Autoplay/Biblioteca: nenhuma playlist salva ainda (aba Playlist vazia).'); return []; }
 
   const recentIds = await recentQueueIds();
   const shuffled  = playlists.sort(() => Math.random() - 0.5);
 
   const pickedIds  = [];
   const usedNames  = [];
+  let failed = 0;
   for (const pl of shuffled) {
     if (pickedIds.length >= LIBRARY_POOL_TARGET || usedNames.length >= LIBRARY_MAX_PLAYLISTS) break;
     let embed;
-    try { embed = await fetchEmbedPlaylist(pl.spotify_id); } catch { continue; }
-    if (!embed?.tracks?.length) continue;
+    // Sem log aqui a falha ficava invisível: se TODAS as playlists falharem
+    // (embed do Spotify bloqueando a VPS, link apodrecido, etc.) o autoplay
+    // simplesmente não tocava nada e não sobrava nenhuma pista do motivo.
+    try { embed = await fetchEmbedPlaylist(pl.spotify_id); }
+    catch (err) { failed++; console.warn(`⚠️  Autoplay/Biblioteca: falhou buscar "${pl.name}" (${pl.spotify_id}) — ${err.response?.status ? `HTTP ${err.response.status}` : err.message}`); continue; }
+    if (!embed?.tracks?.length) { failed++; console.warn(`⚠️  Autoplay/Biblioteca: "${pl.name}" (${pl.spotify_id}) voltou sem faixas (playlist vazia, privada ou removida?).`); continue; }
 
     const fresh = embed.tracks.filter(t => t.id && !recentIds.has(t.id));
     // Playlist pequena e já toda tocada recentemente: melhor repetir dela do
@@ -3056,12 +3066,17 @@ async function libraryAutoplayTracks() {
       usedNames.push(pl.name);
     }
   }
-  if (pickedIds.length === 0) return [];
+  if (pickedIds.length === 0) {
+    console.log(`🎵 Autoplay/Biblioteca: nenhuma faixa aproveitável (${playlists.length} playlist(s) na biblioteca, ${failed} falharam ao buscar).`);
+    return [];
+  }
 
   const raw = await fetchTracksByIds(pickedIds);
   const tracks = await filterAutoplayTracks(raw);
   if (tracks.length) {
     console.log(`🎵 Autoplay: pool da Biblioteca de Playlists — ${usedNames.length} playlist(s) (${usedNames.slice(0, 4).join(', ')}${usedNames.length > 4 ? '…' : ''})`);
+  } else {
+    console.log('🎵 Autoplay/Biblioteca: faixas encontradas mas todas barradas pelo filtro de conteúdo.');
   }
   return tracks;
 }
