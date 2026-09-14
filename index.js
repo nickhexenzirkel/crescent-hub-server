@@ -2972,11 +2972,7 @@ async function maquinaAutoplayTracks() {
   if (weights.size === 0) return [];
 
   // 3) Tira o que acabou de tocar — sem isso o hit do mês voltaria a cada rodada
-  const { data: recent } = await supabase
-    .from('queue').select('spotify_id')
-    .in('status', ['played', 'skipped', 'playing'])
-    .order('created_at', { ascending: false }).limit(MAQUINA_RECENT_SKIP);
-  const recentIds = new Set((recent || []).map(r => r.spotify_id).filter(Boolean));
+  const recentIds = await recentQueueIds();
 
   const all   = [...weights].map(([id, weight]) => ({ id, weight }));
   const fresh = all.filter(e => !recentIds.has(e.id));
@@ -2985,17 +2981,87 @@ async function maquinaAutoplayTracks() {
   if (picked.length === 0) return [];
 
   // 4) A view só guarda id/título — o resto (uri, duração, capa) vem do Spotify
-  const raw = [];
-  for (let i = 0; i < picked.length; i += 50) {
-    const ids = picked.slice(i, i + 50).map(e => e.id).join(',');
-    const r = await spotify('get', `/tracks?ids=${ids}&market=BR`);
-    raw.push(...(r.data?.tracks || []).filter(Boolean));
-  }
+  const raw = await fetchTracksByIds(picked.map(e => e.id));
 
   const tracks = await filterAutoplayTracks(raw);
   if (tracks.length) {
     const top = [...weights].sort((a, b) => b[1] - a[1])[0];
     console.log(`🎵 Autoplay: pool da Máquina do Tempo — ${weights.size} música(s) de ${byMonth.size} mês(es), líder "${titles.get(top[0])}"`);
+  }
+  return tracks;
+}
+
+// ═══════════════════════════════════════════════════════
+// AUTOPLAY GUIADO PELA BIBLIOTECA DE PLAYLISTS
+// 2ª opção do autoplay (depois da Máquina do Tempo): em vez de cair pra
+// recomendação genérica do Spotify (top tracks do usuário, recently-played,
+// playlists em destaque — nada disso tem a ver com o gosto do escritório),
+// sorteia LIBRARY_PER_PLAYLIST faixas de CADA playlist salva na aba
+// "Playlist" da Central Alexa (tabela playlist_library, a mesma lista que
+// qualquer colaborador alimenta colando um link). Gira entre as playlists
+// (embaralhadas a cada rodada) e evita repetir o que acabou de tocar — mesmo
+// critério de "recente" que a Máquina do Tempo usa.
+// ═══════════════════════════════════════════════════════
+
+const LIBRARY_PER_PLAYLIST  = 2;   // faixas sorteadas de CADA playlist da biblioteca
+const LIBRARY_MAX_PLAYLISTS = 12;  // teto de playlists visitadas por rodada (a lib pode crescer bastante)
+const LIBRARY_POOL_TARGET   = 24;  // pool "bom o bastante" pra parar de visitar mais playlists
+
+// IDs tocados/pulados/na fila agora há pouco — usado tanto pela Máquina do
+// Tempo quanto pela Biblioteca de Playlists pra não repetir a mesma faixa.
+async function recentQueueIds(limit = MAQUINA_RECENT_SKIP) {
+  const { data } = await supabase
+    .from('queue').select('spotify_id')
+    .in('status', ['played', 'skipped', 'playing'])
+    .order('created_at', { ascending: false }).limit(limit);
+  return new Set((data || []).map(r => r.spotify_id).filter(Boolean));
+}
+
+// Busca o objeto oficial do Spotify (uri/artists/album/explicit) a partir de
+// uma lista de IDs — o que o filtro de conteúdo e a fila precisam, e que nem
+// a view da Máquina do Tempo nem o embed da playlist guardam sozinhos.
+async function fetchTracksByIds(ids) {
+  const raw = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50).join(',');
+    const r = await spotify('get', `/tracks?ids=${chunk}&market=BR`);
+    raw.push(...(r.data?.tracks || []).filter(Boolean));
+  }
+  return raw;
+}
+
+async function libraryAutoplayTracks() {
+  const { data: playlists, error } = await supabase.from('playlist_library').select('spotify_id,name');
+  if (error) throw error;
+  if (!playlists?.length) return [];
+
+  const recentIds = await recentQueueIds();
+  const shuffled  = playlists.sort(() => Math.random() - 0.5);
+
+  const pickedIds  = [];
+  const usedNames  = [];
+  for (const pl of shuffled) {
+    if (pickedIds.length >= LIBRARY_POOL_TARGET || usedNames.length >= LIBRARY_MAX_PLAYLISTS) break;
+    let embed;
+    try { embed = await fetchEmbedPlaylist(pl.spotify_id); } catch { continue; }
+    if (!embed?.tracks?.length) continue;
+
+    const fresh = embed.tracks.filter(t => t.id && !recentIds.has(t.id));
+    // Playlist pequena e já toda tocada recentemente: melhor repetir dela do
+    // que descartar a playlist inteira da rodada.
+    const from = fresh.length ? fresh : embed.tracks;
+    const chosen = from.sort(() => Math.random() - 0.5).slice(0, LIBRARY_PER_PLAYLIST);
+    if (chosen.length) {
+      pickedIds.push(...chosen.map(t => t.id));
+      usedNames.push(pl.name);
+    }
+  }
+  if (pickedIds.length === 0) return [];
+
+  const raw = await fetchTracksByIds(pickedIds);
+  const tracks = await filterAutoplayTracks(raw);
+  if (tracks.length) {
+    console.log(`🎵 Autoplay: pool da Biblioteca de Playlists — ${usedNames.length} playlist(s) (${usedNames.slice(0, 4).join(', ')}${usedNames.length > 4 ? '…' : ''})`);
   }
   return tracks;
 }
@@ -3015,31 +3081,21 @@ async function startAutoPlaylist() {
       console.warn('⚠️  Autoplay/Máquina do Tempo indisponível:', err.response?.data?.error?.message || err.message);
     }
 
-    // 2ª opção: top tracks do usuário (personalizado, não depreciado)
+    // 2ª opção: a Biblioteca de Playlists (aba "Playlist" da Central Alexa) —
+    // 2 faixas de cada playlist salva, em vez de recomendação genérica do
+    // Spotify (que não tem nada a ver com o gosto do escritório).
     if (tracks.length === 0) {
       try {
-        const r = await spotify('get', '/me/top/tracks?limit=50&time_range=medium_term');
-        // Embaralha para não tocar sempre na mesma ordem
-        const pool = (r.data?.items || []).sort(() => Math.random() - 0.5);
-        tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
-      } catch {}
+        tracks = (await libraryAutoplayTracks()).slice(0, 20);
+      } catch (err) {
+        console.warn('⚠️  Autoplay/Biblioteca de playlists indisponível:', err.response?.data?.error?.message || err.message);
+      }
     }
 
-    // 3ª opção: histórico recente de reprodução
-    if (tracks.length === 0) {
-      try {
-        const r = await spotify('get', '/me/player/recently-played?limit=50');
-        const seen = new Set();
-        const pool = (r.data?.items || [])
-          .map(i => i.track)
-          .filter(t => t && !seen.has(t.id) && seen.add(t.id))
-          .sort(() => Math.random() - 0.5);
-        tracks = (await filterAutoplayTracks(pool)).slice(0, 20);
-      } catch {}
-    }
-
-    // 4ª opção: playlists em destaque no Brasil (não precisa de escopos extras).
-    // Tenta até 3: se o filtro esvaziar uma, passa pra próxima.
+    // 3ª opção — ÚLTIMO recurso: playlists em destaque no Brasil, só quando a
+    // Máquina do Tempo E a Biblioteca de Playlists estão as duas vazias
+    // (instalação nova, sem playlist salva ainda). Tenta até 3: se o filtro
+    // esvaziar uma, passa pra próxima.
     if (tracks.length === 0) {
       try {
         const r = await spotify('get', '/browse/featured-playlists?country=BR&limit=10&locale=pt_BR');
