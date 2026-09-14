@@ -743,6 +743,22 @@ function requireAdminOrModerador(req, res, next) {
   });
 }
 
+// Cargo DJ Uniko (role 'dj'): controla o player da Central Alexa — pausar/tocar,
+// volume e dispositivo — mas NÃO pula música (/api/player/next segue só admin).
+function requireAdminOrDJ(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== 'admin' && req.user.role !== 'dj') return res.status(403).json({ error: 'Acesso restrito a administradores e ao DJ Uniko' });
+    next();
+  });
+}
+// Volume: admin, moderador (o cliente já mostrava o controle pra ele) e DJ Uniko.
+function requireVolumeControl(req, res, next) {
+  requireAuth(req, res, () => {
+    if (!['admin', 'moderador', 'dj'].includes(req.user.role)) return res.status(403).json({ error: 'Acesso restrito a administradores, moderadores e ao DJ Uniko' });
+    next();
+  });
+}
+
 // ═══════════════════════════════════════════════════════
 // SETUP — Cria o primeiro admin (só funciona se DB vazio)
 // ═══════════════════════════════════════════════════════
@@ -1953,8 +1969,8 @@ app.delete('/api/queue/:id', async (req, res) => {
 // CONTROLES DO PLAYER
 // ═══════════════════════════════════════════════════════
 
-// Começa a tocar a primeira música da fila (admin only)
-app.post('/api/player/play', requireAdmin, async (req, res) => {
+// Começa a tocar a primeira música da fila (admin e DJ Uniko)
+app.post('/api/player/play', requireAdminOrDJ, async (req, res) => {
   try {
     const next = await getNextSong();
     if (!next) return res.status(404).json({ error: 'Fila vazia' });
@@ -1966,8 +1982,8 @@ app.post('/api/player/play', requireAdmin, async (req, res) => {
   }
 });
 
-// Pausa (admin only)
-app.post('/api/player/pause', requireAdmin, async (req, res) => {
+// Pausa (admin e DJ Uniko)
+app.post('/api/player/pause', requireAdminOrDJ, async (req, res) => {
   try {
     await spotify('put', '/me/player/pause');
     await supabase.from('player_state').upsert({ id: 1, is_playing: false, updated_at: new Date().toISOString() });
@@ -1977,8 +1993,8 @@ app.post('/api/player/pause', requireAdmin, async (req, res) => {
   }
 });
 
-// Retoma (admin only)
-app.post('/api/player/resume', requireAdmin, async (req, res) => {
+// Retoma (admin e DJ Uniko)
+app.post('/api/player/resume', requireAdminOrDJ, async (req, res) => {
   try {
     await spotify('put', '/me/player/play');
     await supabase.from('player_state').upsert({ id: 1, is_playing: true, updated_at: new Date().toISOString() });
@@ -2034,8 +2050,8 @@ app.put('/api/player/seek', requireAdmin, async (req, res) => {
   }
 });
 
-// Ajuste de volume (admin only)
-app.put('/api/player/volume', requireAdmin, async (req, res) => {
+// Ajuste de volume (admin, moderador e DJ Uniko)
+app.put('/api/player/volume', requireVolumeControl, async (req, res) => {
   const volume_percent = parseInt(req.query.volume_percent ?? req.body?.volume_percent);
   if (isNaN(volume_percent) || volume_percent < 0 || volume_percent > 100)
     return res.status(400).json({ error: 'volume_percent deve ser 0-100' });
