@@ -118,6 +118,10 @@ app.options('*', cors());
 // MP3 (extraída do ID3) como base64 dentro do JSON de POST /api/queue, e uma
 // capa embutida de tamanho normal já estoura isso sozinha (PayloadTooLargeError).
 app.use(express.json({ limit: '5mb' }));
+// A Hostinger não serve estáticos de public/ no front-end (cai no fallback de SPA
+// pra qualquer extensão fora de uma lista curta) — serve daqui em vez disso
+// (ex.: /uniko-catbot.zip).
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Supabase ────────────────────────────────────────────
 const supabase = createClient(
