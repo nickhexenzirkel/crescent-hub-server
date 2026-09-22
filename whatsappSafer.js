@@ -55,19 +55,31 @@ async function getWaPage() {
   return waPage;
 }
 
+// `.isVisible()` do Playwright NÃO espera — checa o estado NA HORA. Usar
+// `.waitFor()` de verdade evita pegar um estado de transição pela metade
+// (ex: exatamente no instante entre escanear o QR e a lista carregar).
+const waitVisible = (locator, timeout) =>
+  locator.waitFor({ state: 'visible', timeout }).then(() => true).catch(() => false);
+
 async function getWaStatus() {
   const page = await getWaPage();
   await page.waitForLoadState('domcontentloaded').catch(() => {});
 
+  // Login primeiro (dois sinais independentes — caixa de busca OU item da
+  // lista), SEMPRE checado antes do QR: depois de escanear, um canvas do QR
+  // pode continuar um instante no DOM (oculto) — checar login primeiro evita
+  // ficar "preso" reportando precisar de QR mesmo já logado.
+  const loggedIn =
+    (await waitVisible(page.getByRole('textbox', { name: /pesquisar|search/i }).first(), 4000)) ||
+    (await waitVisible(page.getByRole('listitem').first(), 2000));
+  if (loggedIn) return { loggedIn: true };
+
   const qrCanvas = page.locator('canvas').first();
-  const hasQr = await qrCanvas.isVisible({ timeout: 5000 }).catch(() => false);
+  const hasQr = await waitVisible(qrCanvas, 4000);
   if (hasQr) {
     const buf = await qrCanvas.screenshot().catch(() => null);
     if (buf) return { needsQr: true, qrImageBase64: buf.toString('base64') };
   }
-
-  const hasChats = await page.getByRole('listitem').first().isVisible({ timeout: 8000 }).catch(() => false);
-  if (hasChats) return { loggedIn: true };
 
   return { needsQr: false, loggedIn: false, message: 'Carregando WhatsApp Web...' };
 }
