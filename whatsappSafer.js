@@ -545,6 +545,27 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     }
   });
 
+  // Diagnóstico: mostra exatamente o texto de CADA linha da barra lateral
+  // agora, e o que está salvo no snapshot da sincronização periódica — pra
+  // investigar por que um contato não está sendo detectado como "mudou".
+  // Sem side-effect nenhum (não mexe no snapshot). Remover depois de achado
+  // o bug.
+  app.get('/api/safer/whatsapp/debug-activity', requireAdminOrModerador, async (req, res) => {
+    try {
+      const page = await getWaPage();
+      const { names, activity } = await collectSidebarNames(page);
+      const rows = names.map(n => ({
+        name: n,
+        currentText: activity.get(n),
+        snapshotText: lastActivitySnapshot.get(n) ?? null,
+        changed: lastActivitySnapshot.get(n) !== activity.get(n),
+      }));
+      res.json({ count: rows.length, rows });
+    } catch (err) {
+      res.status(500).json({ error: shortErr(err) });
+    }
+  });
+
   // Só marca o estado atual da barra lateral como "já visto", sem exportar
   // nada — é o que roda quando o usuário ATIVA o modo de sincronização
   // periódica, pra ele não disparar sem querer uma rodada completa de
