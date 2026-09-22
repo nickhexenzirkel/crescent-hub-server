@@ -144,19 +144,24 @@ async function exportContact(page, name) {
   const found = await result.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!found) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
   await result.click();
-  await page.waitForTimeout(500);
+  // Grupos grandes/pesados demoram bem mais pra carregar o histórico (visto
+  // ao vivo: o navegador chega a travar alguns segundos) — dá um tempo pra
+  // acomodar antes de caçar o menu, senão o clique cai fora do lugar.
+  await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => {});
+  await page.waitForTimeout(600);
 
   // Botão do cabeçalho da conversa chama "Mais opções" (não "Menu") — existe
   // outro "Mais opções" global perto do título "WhatsApp", por isso .last()
-  // (o da conversa aberta vem depois no DOM).
+  // (o da conversa aberta vem depois no DOM). Timeout curto (não os 30s
+  // padrão do Playwright) pra um contato travado não segurar o job inteiro.
   const menuBtn = page.getByRole('button', { name: /mais opções/i }).last();
-  await menuBtn.click();
+  await menuBtn.click({ timeout: 8000 });
   await page.waitForTimeout(300);
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
   const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
   if (!hasExportItem) throw new Error('Item "Exportar conversa" não apareceu no menu.');
-  await exportItem.click();
+  await exportItem.click({ timeout: 8000 });
   await page.waitForTimeout(500);
 
   // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
@@ -164,8 +169,8 @@ async function exportContact(page, name) {
   // botão "Exportar", que já dispara o download direto.
   const confirmBtn = page.getByRole('button', { name: 'Exportar', exact: true }).last();
   const [download] = await Promise.all([
-    page.waitForEvent('download', { timeout: 20000 }),
-    confirmBtn.click(),
+    page.waitForEvent('download', { timeout: 15000 }),
+    confirmBtn.click({ timeout: 8000 }),
   ]);
 
   const filePath = await download.path();
@@ -182,6 +187,10 @@ async function exportContact(page, name) {
 
   return { buffer, filename };
 }
+
+// Erro do Playwright pode vir com um "call log" de centenas de linhas
+// (cada tentativa de clique registrada) — só a 1ª linha importa pro usuário.
+const shortErr = (err) => String(err?.message || err).split('\n')[0].slice(0, 160);
 
 /* ── Loop principal do job ───────────────────────────────── */
 
@@ -215,8 +224,19 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         job.files.push({ buffer, filename });
         log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
       } catch (err) {
-        log({ contactName: name, status: 'error', message: err.message });
+        // Mensagem completa (com o call log do Playwright, que pode ter
+        // centenas de linhas) só no console/pm2 — no job.logs (que o
+        // frontend faz polling e renderiza a cada 2s) só a 1ª linha, resumida.
+        // Log gigante repetido travava o navegador do usuário (FPS caindo).
         console.error(`[uniko-safer-wa] erro em "${name}":`, err.message);
+        log({ contactName: name, status: 'error', message: shortErr(err) });
+      } finally {
+        // SEMPRE tenta voltar a um estado limpo antes do próximo contato,
+        // sucesso ou erro — sem isso, um contato que falhasse no meio do
+        // caminho (ex: diálogo travado) deixava a página numa posição ruim e
+        // TODOS os contatos seguintes falhavam igual, em cadeia.
+        await closeAnyDialog(page).catch(() => {});
+        await page.keyboard.press('Escape').catch(() => {});
       }
       if (i < names.length - 1 && !job.stopRequested) {
         await new Promise((r) => setTimeout(r, pauseSeconds * 1000));
@@ -225,9 +245,10 @@ async function runWhatsappImport(jobId, pauseSeconds) {
 
     job.status = job.status === 'error' ? job.status : 'done';
   } catch (err) {
+    console.error('[uniko-safer-wa] erro inesperado:', err.message);
     job.status = 'error';
-    job.message = err.message;
-    log({ type: 'error', message: `Erro inesperado: ${err.message}` });
+    job.message = shortErr(err);
+    log({ type: 'error', message: `Erro inesperado: ${shortErr(err)}` });
   } finally {
     setTimeout(() => waJobs.delete(jobId), WA_JOB_TTL_MS);
   }
