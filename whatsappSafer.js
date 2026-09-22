@@ -71,7 +71,7 @@ async function getWaStatus() {
   // ficar "preso" reportando precisar de QR mesmo já logado.
   const loggedIn =
     (await waitVisible(page.getByRole('textbox', { name: /pesquisar|search/i }).first(), 4000)) ||
-    (await waitVisible(page.getByRole('listitem').first(), 2000));
+    (await waitVisible(page.getByRole('row').first(), 2000));
   if (loggedIn) return { loggedIn: true };
 
   const qrCanvas = page.locator('canvas').first();
@@ -91,7 +91,10 @@ async function collectSidebarNames(page) {
   let stableRounds = 0;
 
   for (let i = 0; i < 80 && stableRounds < 3; i++) {
-    const rows = await page.getByRole('listitem').all();
+    // A barra lateral do WhatsApp Web é um grid (role="grid" "Lista de
+    // conversas") com linhas role="row" — NÃO role="listitem" (confirmado
+    // inspecionando ao vivo em 22/set/2026; era por isso que nada era achado).
+    const rows = await page.getByRole('row').all();
     const before = names.size;
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
@@ -108,40 +111,49 @@ async function collectSidebarNames(page) {
 /* ── Exportação de UMA conversa ──────────────────────────── */
 
 async function exportContact(page, name) {
-  const searchBox = page.getByRole('textbox', { name: /pesquisar|search/i }).first();
+  const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
   await searchBox.click();
-  await page.keyboard.press('Control+A').catch(() => {});
-  await page.keyboard.press('Backspace').catch(() => {});
-  await searchBox.type(name, { delay: 30 });
+  await searchBox.fill(name);
   await page.waitForTimeout(700);
 
-  const result = page.getByRole('listitem').filter({ hasText: name }).first();
-  const found = await result.isVisible({ timeout: 5000 }).catch(() => false);
+  // A busca também traz "Grupos em comum" onde o contato só é MEMBRO (não é
+  // a própria conversa) — mas esses aparecem depois da seção "Conversas" no
+  // DOM, então .first() sempre pega a conversa direta, nunca um grupo.
+  const result = page.getByRole('row').filter({ hasText: name }).first();
+  const found = await result.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!found) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
   await result.click();
   await page.waitForTimeout(500);
 
-  const menuBtn = page.getByRole('button', { name: /menu/i }).last();
+  // Botão do cabeçalho da conversa chama "Mais opções" (não "Menu") — existe
+  // outro "Mais opções" global perto do título "WhatsApp", por isso .last()
+  // (o da conversa aberta vem depois no DOM).
+  const menuBtn = page.getByRole('button', { name: /mais opções/i }).last();
   await menuBtn.click();
   await page.waitForTimeout(300);
 
-  const exportItem = page.getByText(/exportar conversa|export chat/i).first();
-  const hasExportItem = await exportItem.isVisible({ timeout: 4000 }).catch(() => false);
+  const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
+  const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
   if (!hasExportItem) throw new Error('Item "Exportar conversa" não apareceu no menu.');
   await exportItem.click();
   await page.waitForTimeout(500);
 
-  const noMediaBtn = page.getByText(/sem mídia|without media/i).first();
+  // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
+  // só "Todas as mensagens" (já selecionado) / "Intervalo personalizado" e o
+  // botão "Exportar", que já dispara o download direto.
+  const confirmBtn = page.getByRole('button', { name: 'Exportar', exact: true }).last();
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: 20000 }),
-    noMediaBtn.click(),
+    confirmBtn.click(),
   ]);
 
   const filePath = await download.path();
   const buffer   = await fs.promises.readFile(filePath);
   const filename = download.suggestedFilename() || `${name}.txt`;
 
-  await page.keyboard.press('Escape').catch(() => {});
+  // Limpa a busca pro próximo contato (botão "Fechar" do campo de busca).
+  const clearBtn = page.getByRole('button', { name: /fechar/i }).first();
+  if (await clearBtn.isVisible().catch(() => false)) await clearBtn.click().catch(() => {});
 
   return { buffer, filename };
 }
