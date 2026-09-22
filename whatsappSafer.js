@@ -236,6 +236,21 @@ async function findRowByExactName(page, name, timeoutMs) {
   return null;
 }
 
+// Marca em QUAL PASSO um erro aconteceu — sem isso, todo timeout aparecia
+// só como "locator.click: Timeout 8000ms exceeded" sem dizer se travou
+// buscando, abrindo o menu, ou esperando o download. Isso já teria
+// respondido de cara se era "trava no clique" (confirmado que é) ou "trava
+// esperando o arquivo depois de clicar" (nunca foi isso, mas agora fica
+// provado no próprio log, não só na minha palavra).
+async function step(label, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    err.message = `[${label}] ${err.message}`;
+    throw err;
+  }
+}
+
 async function exportContact(page, name) {
   await closeAnyDialog(page);
 
@@ -246,7 +261,7 @@ async function exportContact(page, name) {
   // percebeu exatamente isso: as conversas que apareciam embaixo às vezes
   // eram de uma busca diferente da que devia).
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
-  await searchBox.click({ timeout: 8000 });
+  await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
   await page.keyboard.press('Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
   await page.keyboard.type(name, { delay: 40 });
@@ -259,7 +274,7 @@ async function exportContact(page, name) {
   // EXATO com o nome — mesmo critério usado pra coletar os nomes.
   const result = await findRowByExactName(page, name, 6000);
   if (!result) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
-  await result.click({ timeout: 8000, force: true });
+  await step('clicar no contato encontrado', () => result.click({ timeout: 8000, force: true }));
   // NÃO usar waitForLoadState('networkidle') aqui — essa conta recebe
   // mensagem real o tempo todo (WebSocket sempre ativo), a rede nunca fica
   // parada de verdade, e isso queimava os 6s inteiros de espera em TODA
@@ -272,7 +287,7 @@ async function exportContact(page, name) {
   // (o da conversa aberta vem depois no DOM). Timeout curto (não os 30s
   // padrão do Playwright) pra um contato travado não segurar o job inteiro.
   const menuBtn = page.getByRole('button', { name: /mais opções/i }).last();
-  await menuBtn.click({ timeout: 8000, force: true });
+  await step('abrir "Mais opções"', () => menuBtn.click({ timeout: 8000, force: true }));
   await page.waitForTimeout(300);
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
@@ -284,7 +299,7 @@ async function exportContact(page, name) {
     err.permanent = true;
     throw err;
   }
-  await exportItem.click({ timeout: 8000, force: true });
+  await step('clicar "Exportar conversa" no menu', () => exportItem.click({ timeout: 8000, force: true }));
   await page.waitForTimeout(500);
 
   // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
@@ -296,12 +311,17 @@ async function exportContact(page, name) {
   // que `page.getByRole('button', {name:'Exportar'}).last()` sem escopo
   // podia estar mirando o elemento errado.
   const exportDialog = page.getByRole('dialog').first();
-  await exportDialog.waitFor({ state: 'visible', timeout: 5000 });
+  await step('esperar o diálogo de exportação abrir', () => exportDialog.waitFor({ state: 'visible', timeout: 5000 }));
   const confirmBtn = exportDialog.getByRole('button', { name: 'Exportar', exact: true });
-  const [download] = await Promise.all([
-    page.waitForEvent('download', { timeout: 15000 }),
-    confirmBtn.click({ timeout: 8000, force: true }),
-  ]);
+  // Regista a espera do download ANTES do clique (evita perder o evento se
+  // disparar rápido demais) — mas com etapas SEPARADAS: se travar em
+  // "clicar Exportar no diálogo" é o clique mesmo; se passar disso e travar
+  // em "aguardar o download começar", é outra coisa (ex: WhatsApp aceitou o
+  // clique mas não disparou o download) — nunca foi o 2º caso até agora,
+  // mas agora fica provado no log de qual dos dois é.
+  const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
+  await step('clicar "Exportar" no diálogo', () => confirmBtn.click({ timeout: 8000, force: true }));
+  const download = await step('aguardar o download começar', () => downloadPromise);
 
   const filePath = await download.path();
   const buffer   = await fs.promises.readFile(filePath);
