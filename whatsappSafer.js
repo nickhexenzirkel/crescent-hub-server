@@ -105,7 +105,7 @@ async function getWaStatus() {
 async function clearSearch(page) {
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
   if (await searchBox.isVisible().catch(() => false)) {
-    await searchBox.fill('').catch(() => {});
+    await searchBox.fill('', { force: true }).catch(() => {});
     await page.waitForTimeout(300);
   }
 }
@@ -157,7 +157,7 @@ async function closeAnyDialog(page) {
     // Tenta um botão óbvio de confirmar/fechar dentro do diálogo antes do
     // Escape — alguns diálogos de aviso do WhatsApp não fecham com Escape.
     const confirmish = dialog.getByRole('button', { name: /ok|entendi|fechar|cancelar/i }).first();
-    if (await confirmish.isVisible().catch(() => false)) await confirmish.click().catch(() => {});
+    if (await confirmish.isVisible().catch(() => false)) await confirmish.click({ force: true }).catch(() => {});
     else await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(400);
   }
@@ -166,9 +166,15 @@ async function closeAnyDialog(page) {
 async function exportContact(page, name) {
   await closeAnyDialog(page);
 
+  // `force: true` em todos os cliques abaixo: essa conta recebe mensagens
+  // reais o tempo todo (confirmado ao vivo), e cada mensagem nova reordena/
+  // redesenha a barra lateral — a checagem padrão do Playwright de "elemento
+  // parado" (sem se mover/redesenhar por alguns frames seguidos) pode nunca
+  // passar numa tela que se reorganiza sozinha o tempo todo. force pula essa
+  // checagem e clica direto na posição atual do elemento.
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
-  await searchBox.click({ timeout: 8000 });
-  await searchBox.fill(name);
+  await searchBox.click({ timeout: 8000, force: true });
+  await searchBox.fill(name, { force: true });
   await page.waitForTimeout(700);
 
   // A busca também traz "Grupos em comum" onde o contato só é MEMBRO (não é
@@ -177,7 +183,7 @@ async function exportContact(page, name) {
   const result = page.getByRole('row').filter({ hasText: name }).first();
   const found = await result.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!found) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
-  await result.click({ timeout: 8000 });
+  await result.click({ timeout: 8000, force: true });
   // Grupos grandes/pesados demoram bem mais pra carregar o histórico (visto
   // ao vivo: o navegador chega a travar alguns segundos) — dá um tempo pra
   // acomodar antes de caçar o menu, senão o clique cai fora do lugar.
@@ -189,13 +195,13 @@ async function exportContact(page, name) {
   // (o da conversa aberta vem depois no DOM). Timeout curto (não os 30s
   // padrão do Playwright) pra um contato travado não segurar o job inteiro.
   const menuBtn = page.getByRole('button', { name: /mais opções/i }).last();
-  await menuBtn.click({ timeout: 8000 });
+  await menuBtn.click({ timeout: 8000, force: true });
   await page.waitForTimeout(300);
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
   const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
   if (!hasExportItem) throw new Error('Item "Exportar conversa" não apareceu no menu.');
-  await exportItem.click({ timeout: 8000 });
+  await exportItem.click({ timeout: 8000, force: true });
   await page.waitForTimeout(500);
 
   // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
@@ -204,7 +210,7 @@ async function exportContact(page, name) {
   const confirmBtn = page.getByRole('button', { name: 'Exportar', exact: true }).last();
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: 15000 }),
-    confirmBtn.click({ timeout: 8000 }),
+    confirmBtn.click({ timeout: 8000, force: true }),
   ]);
 
   const filePath = await download.path();
