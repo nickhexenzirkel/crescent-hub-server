@@ -122,6 +122,12 @@ const NON_CONTACT_PATTERN = /mensagens?\s+não\s+lidas?/i;
 const looksLikeContact = (text) =>
   !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text);
 
+// Algumas linhas têm um caractere solto ANTES do nome de verdade (visto ao
+// vivo: "F\nFaturamento Antigo\n13:43\nFoto" virava o "contato" F) — ignora
+// linhas com menos de 2 caracteres ao decidir qual é o nome.
+const extractRowName = (text) =>
+  text.split('\n').map(l => l.trim()).find(l => l.length >= 2) || '';
+
 async function collectSidebarNames(page) {
   await clearSearch(page);
 
@@ -136,7 +142,7 @@ async function collectSidebarNames(page) {
     const before = names.size;
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
-      const firstLine = text.split('\n')[0]?.trim();
+      const firstLine = extractRowName(text);
       if (looksLikeContact(firstLine)) names.add(firstLine);
     }
     if (names.size === before) stableRounds++; else stableRounds = 0;
@@ -185,7 +191,7 @@ async function findRowByExactName(page, name, timeoutMs) {
     const rows = await page.getByRole('row').all();
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
-      if (text.split('\n')[0]?.trim() === name) return row;
+      if (extractRowName(text) === name) return row;
     }
     await page.waitForTimeout(300);
   }
@@ -216,11 +222,12 @@ async function exportContact(page, name) {
   const result = await findRowByExactName(page, name, 6000);
   if (!result) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
   await result.click({ timeout: 8000, force: true });
-  // Grupos grandes/pesados demoram bem mais pra carregar o histórico (visto
-  // ao vivo: o navegador chega a travar alguns segundos) — dá um tempo pra
-  // acomodar antes de caçar o menu, senão o clique cai fora do lugar.
-  await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => {});
-  await page.waitForTimeout(600);
+  // NÃO usar waitForLoadState('networkidle') aqui — essa conta recebe
+  // mensagem real o tempo todo (WebSocket sempre ativo), a rede nunca fica
+  // parada de verdade, e isso queimava os 6s inteiros de espera em TODA
+  // conversa (não só nas pesadas), sobrando pouco tempo pros cliques
+  // seguintes. Espera fixa é mais previsível aqui.
+  await page.waitForTimeout(1200);
 
   // Botão do cabeçalho da conversa chama "Mais opções" (não "Menu") — existe
   // outro "Mais opções" global perto do título "WhatsApp", por isso .last()
