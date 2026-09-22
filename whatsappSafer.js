@@ -150,17 +150,27 @@ const looksLikeContact = (text) =>
 const extractRowName = (text) =>
   text.split('\n').map(l => l.trim()).find(l => l.length >= 2) || '';
 
+// A barra lateral do WhatsApp Web é um grid (role="grid", "Lista de
+// conversas" fora de busca / "Resultados da pesquisa." durante busca) com
+// linhas role="row" — mas o CORPO da conversa aberta TAMBÉM usa role="row"
+// pras mensagens! Sem escopar no grid da barra lateral especificamente,
+// `getByRole('row')` pega as duas coisas juntas — visto ao vivo: depois de
+// um reload o WhatsApp reabre sozinho a última conversa, e texto de
+// mensagem ("Bom dia!", "Adicionado"...) virava "contato" pra buscar.
+// O grid da barra lateral é sempre o primeiro na página (fica à esquerda).
+const sidebarGrid = (page) => page.getByRole('grid').first();
+
 async function collectSidebarNames(page) {
   await clearSearch(page);
+  // Fecha qualquer conversa que tenha ficado aberta (reload não fecha
+  // sozinho) antes de escanear a barra lateral.
+  await page.keyboard.press('Escape').catch(() => {});
 
   const names = new Set();
   let stableRounds = 0;
 
   for (let i = 0; i < 80 && stableRounds < 3; i++) {
-    // A barra lateral do WhatsApp Web é um grid (role="grid" "Lista de
-    // conversas") com linhas role="row" — NÃO role="listitem" (confirmado
-    // inspecionando ao vivo em 22/set/2026; era por isso que nada era achado).
-    const rows = await page.getByRole('row').all();
+    const rows = await sidebarGrid(page).getByRole('row').all();
     const before = names.size;
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
@@ -210,7 +220,7 @@ async function closeAnyDialog(page, timeoutMs = 5000) {
 async function findRowByExactName(page, name, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const rows = await page.getByRole('row').all();
+    const rows = await sidebarGrid(page).getByRole('row').all();
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
       if (extractRowName(text) === name) return row;
