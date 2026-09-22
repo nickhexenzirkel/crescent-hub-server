@@ -88,6 +88,17 @@ async function getWaPage() {
 const waitVisible = (locator, timeout) =>
   locator.waitFor({ state: 'visible', timeout }).then(() => true).catch(() => false);
 
+// CAUSA RAIZ ACHADA AO VIVO (debug-dom): o campo de busca perde o aria-label
+// ("Pesquisar ou começar uma nova conversa") depois de já ter sido usado uma
+// vez — fica com nome acessível VAZIO mesmo com texto dentro. Um locator por
+// role+nome (`getByRole('textbox', {name:/pesquisar/i})`) para de achar o
+// campo a partir do 2º contato pra frente — exatamente o "[clicar na busca]
+// Timeout" que aparecia em TODO contato depois do primeiro. `data-tab="3"`
+// é o atributo interno que o próprio WhatsApp usa (ordem de tabulação) e
+// não muda com o estado do campo — usado com fallback pro aria-label caso
+// esse atributo mude numa atualização futura do WhatsApp Web.
+const searchBoxLocator = (page) => page.locator('[data-tab="3"], [aria-label*="esquisar" i]').first();
+
 async function getWaStatus() {
   const page = await getWaPage();
   await page.waitForLoadState('domcontentloaded').catch(() => {});
@@ -97,7 +108,7 @@ async function getWaStatus() {
   // pode continuar um instante no DOM (oculto) — checar login primeiro evita
   // ficar "preso" reportando precisar de QR mesmo já logado.
   const loggedIn =
-    (await waitVisible(page.getByRole('textbox', { name: /pesquisar|search/i }).first(), 4000)) ||
+    (await waitVisible(searchBoxLocator(page), 4000)) ||
     (await waitVisible(page.getByRole('row').first(), 2000));
   if (loggedIn) return { loggedIn: true };
 
@@ -125,7 +136,7 @@ async function getWaStatus() {
 // desativadas), então um `getByRole('button', {name:/fechar/i})` sem escopo
 // específico podia acabar clicando na coisa errada.
 async function clearSearch(page) {
-  const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
+  const searchBox = searchBoxLocator(page);
   if (await searchBox.isVisible().catch(() => false)) {
     await searchBox.click().catch(() => {});
     await page.keyboard.press('Control+A').catch(() => {});
@@ -260,7 +271,7 @@ async function exportContact(page, name) {
   // interno do WhatsApp ainda respondendo à busca ANTERIOR (o usuário
   // percebeu exatamente isso: as conversas que apareciam embaixo às vezes
   // eram de uma busca diferente da que devia).
-  const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
+  const searchBox = searchBoxLocator(page);
   await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
   await page.keyboard.press('Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
