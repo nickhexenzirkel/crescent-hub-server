@@ -86,7 +86,37 @@ async function getWaStatus() {
 
 /* ── Coleta de contatos da barra lateral ─────────────────── */
 
+// Limpa a caixa de busca — se uma tentativa anterior tiver terminado no meio
+// (job travado, erro fatal), o texto da última busca fica lá, e a barra
+// lateral passa a mostrar "Resultados da pesquisa" (com cabeçalhos tipo
+// "Conversas"/"Grupos em comum" como se fossem linhas de contato) em vez da
+// lista completa de verdade. Era exatamente isso que fazia aparecer só 6
+// "contatos" com nomes tipo "Conversas" e "1 mensagem não lida".
+async function clearSearch(page) {
+  const clearBtn = page.getByRole('button', { name: /fechar/i }).first();
+  if (await clearBtn.isVisible().catch(() => false)) {
+    await clearBtn.click().catch(() => {});
+    await page.waitForTimeout(400);
+    return;
+  }
+  const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
+  if (await searchBox.isVisible().catch(() => false)) {
+    await searchBox.fill('').catch(() => {});
+    await page.waitForTimeout(400);
+  }
+}
+
+// Textos que aparecem como `row` na lista mas não são conversas de verdade —
+// cabeçalhos de seção, avisos, contadores de não lidas, etc.
+const NON_CONTACT_ROW = /^(conversas|grupos em comum|arquivadas|fixadas|favoritas|não lidas)$/i;
+const NON_CONTACT_PATTERN = /^\d+\s+mensagens?\s+não\s+lidas?$/i;
+
+const looksLikeContact = (text) =>
+  !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text);
+
 async function collectSidebarNames(page) {
+  await clearSearch(page);
+
   const names = new Set();
   let stableRounds = 0;
 
@@ -99,7 +129,7 @@ async function collectSidebarNames(page) {
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
       const firstLine = text.split('\n')[0]?.trim();
-      if (firstLine) names.add(firstLine);
+      if (looksLikeContact(firstLine)) names.add(firstLine);
     }
     if (names.size === before) stableRounds++; else stableRounds = 0;
     await page.mouse.wheel(0, 800).catch(() => {});
@@ -133,7 +163,7 @@ async function exportContact(page, name) {
   await closeAnyDialog(page);
 
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
-  await searchBox.click();
+  await searchBox.click({ timeout: 8000 });
   await searchBox.fill(name);
   await page.waitForTimeout(700);
 
@@ -143,7 +173,7 @@ async function exportContact(page, name) {
   const result = page.getByRole('row').filter({ hasText: name }).first();
   const found = await result.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
   if (!found) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
-  await result.click();
+  await result.click({ timeout: 8000 });
   // Grupos grandes/pesados demoram bem mais pra carregar o histórico (visto
   // ao vivo: o navegador chega a travar alguns segundos) — dá um tempo pra
   // acomodar antes de caçar o menu, senão o clique cai fora do lugar.
@@ -180,10 +210,7 @@ async function exportContact(page, name) {
   // Garante que o diálogo de exportação fechou antes de seguir pro próximo
   // contato (era o que travava tudo com "intercepts pointer events").
   await closeAnyDialog(page);
-
-  // Limpa a busca pro próximo contato (botão "Fechar" do campo de busca).
-  const clearBtn = page.getByRole('button', { name: /fechar/i }).first();
-  if (await clearBtn.isVisible().catch(() => false)) await clearBtn.click().catch(() => {});
+  await clearSearch(page);
 
   return { buffer, filename };
 }
@@ -237,6 +264,7 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         // TODOS os contatos seguintes falhavam igual, em cadeia.
         await closeAnyDialog(page).catch(() => {});
         await page.keyboard.press('Escape').catch(() => {});
+        await clearSearch(page).catch(() => {});
       }
       if (i < names.length - 1 && !job.stopRequested) {
         await new Promise((r) => setTimeout(r, pauseSeconds * 1000));
