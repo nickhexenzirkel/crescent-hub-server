@@ -175,6 +175,23 @@ async function closeAnyDialog(page, timeoutMs = 5000) {
   return false;
 }
 
+// Acha a linha cuja PRIMEIRA linha de texto bate EXATO com o nome — mesmo
+// critério usado em collectSidebarNames pra coletar os nomes, evita pegar
+// uma menção do nome dentro de "Grupos em comum"/"Mensagens" (que citam o
+// nome no meio do texto, mas cuja primeira linha é o nome do GRUPO).
+async function findRowByExactName(page, name, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const rows = await page.getByRole('row').all();
+    for (const row of rows) {
+      const text = await row.innerText().catch(() => '');
+      if (text.split('\n')[0]?.trim() === name) return row;
+    }
+    await page.waitForTimeout(300);
+  }
+  return null;
+}
+
 async function exportContact(page, name) {
   await closeAnyDialog(page);
 
@@ -191,12 +208,13 @@ async function exportContact(page, name) {
   await page.keyboard.type(name, { delay: 40 });
   await page.waitForTimeout(700);
 
-  // A busca também traz "Grupos em comum" onde o contato só é MEMBRO (não é
-  // a própria conversa) — mas esses aparecem depois da seção "Conversas" no
-  // DOM, então .first() sempre pega a conversa direta, nunca um grupo.
-  const result = page.getByRole('row').filter({ hasText: name }).first();
-  const found = await result.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
-  if (!found) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
+  // A busca com uma conta movimentada traz várias seções (Conversas,
+  // Contatos, Grupos em comum, Mensagens) — `hasText` (contém em qualquer
+  // lugar da linha) pegava menções do nome dentro de grupo/mensagem em vez
+  // da conversa direta. Agora só considera a linha cuja PRIMEIRA linha bate
+  // EXATO com o nome — mesmo critério usado pra coletar os nomes.
+  const result = await findRowByExactName(page, name, 6000);
+  if (!result) throw new Error('Contato não encontrado na busca do WhatsApp Web.');
   await result.click({ timeout: 8000, force: true });
   // Grupos grandes/pesados demoram bem mais pra carregar o histórico (visto
   // ao vivo: o navegador chega a travar alguns segundos) — dá um tempo pra
