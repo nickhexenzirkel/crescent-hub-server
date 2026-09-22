@@ -110,7 +110,28 @@ async function collectSidebarNames(page) {
 
 /* ── Exportação de UMA conversa ──────────────────────────── */
 
+// Fecha qualquer diálogo (role="dialog") que tenha ficado aberto — ex: o
+// próprio "Exportar conversa" não fechou sozinho, ou um aviso extra do
+// WhatsApp (como o "Sobre a exportação de conversas" que só aparece na
+// PRIMEIRA vez que a conta usa essa função). Sem isso, o diálogo intercepta
+// os cliques do próximo contato e trava tudo com timeout.
+async function closeAnyDialog(page) {
+  for (let i = 0; i < 4; i++) {
+    const dialog = page.getByRole('dialog').first();
+    const open = await dialog.isVisible().catch(() => false);
+    if (!open) return;
+    // Tenta um botão óbvio de confirmar/fechar dentro do diálogo antes do
+    // Escape — alguns diálogos de aviso do WhatsApp não fecham com Escape.
+    const confirmish = dialog.getByRole('button', { name: /ok|entendi|fechar|cancelar/i }).first();
+    if (await confirmish.isVisible().catch(() => false)) await confirmish.click().catch(() => {});
+    else await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(400);
+  }
+}
+
 async function exportContact(page, name) {
+  await closeAnyDialog(page);
+
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
   await searchBox.click();
   await searchBox.fill(name);
@@ -150,6 +171,10 @@ async function exportContact(page, name) {
   const filePath = await download.path();
   const buffer   = await fs.promises.readFile(filePath);
   const filename = download.suggestedFilename() || `${name}.txt`;
+
+  // Garante que o diálogo de exportação fechou antes de seguir pro próximo
+  // contato (era o que travava tudo com "intercepts pointer events").
+  await closeAnyDialog(page);
 
   // Limpa a busca pro próximo contato (botão "Fechar" do campo de busca).
   const clearBtn = page.getByRole('button', { name: /fechar/i }).first();
