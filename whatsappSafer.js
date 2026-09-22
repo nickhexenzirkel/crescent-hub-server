@@ -151,18 +151,26 @@ async function collectSidebarNames(page) {
 // WhatsApp (como o "Sobre a exportação de conversas" que só aparece na
 // PRIMEIRA vez que a conta usa essa função). Sem isso, o diálogo intercepta
 // os cliques do próximo contato e trava tudo com timeout.
-async function closeAnyDialog(page) {
-  for (let i = 0; i < 4; i++) {
+async function closeAnyDialog(page, timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
     const dialog = page.getByRole('dialog').first();
     const open = await dialog.isVisible().catch(() => false);
-    if (!open) return;
-    // Tenta um botão óbvio de confirmar/fechar dentro do diálogo antes do
-    // Escape — alguns diálogos de aviso do WhatsApp não fecham com Escape.
-    const confirmish = dialog.getByRole('button', { name: /ok|entendi|fechar|cancelar/i }).first();
-    if (await confirmish.isVisible().catch(() => false)) await confirmish.click({ force: true }).catch(() => {});
-    else await page.keyboard.press('Escape').catch(() => {});
+    if (!open) return true;
+    // "Cancelar" primeiro — confirmado ao vivo (debug-dom) que é o botão
+    // real do diálogo "Exportar conversa" que mais aparece travado. Só cai
+    // pro genérico/Escape se não achar Cancelar.
+    const cancelBtn = dialog.getByRole('button', { name: /cancelar/i }).first();
+    if (await cancelBtn.isVisible().catch(() => false)) {
+      await cancelBtn.click({ force: true }).catch(() => {});
+    } else {
+      const confirmish = dialog.getByRole('button', { name: /ok|entendi|fechar/i }).first();
+      if (await confirmish.isVisible().catch(() => false)) await confirmish.click({ force: true }).catch(() => {});
+      else await page.keyboard.press('Escape').catch(() => {});
+    }
     await page.waitForTimeout(400);
   }
+  return false;
 }
 
 async function exportContact(page, name) {
@@ -211,7 +219,14 @@ async function exportContact(page, name) {
   // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
   // só "Todas as mensagens" (já selecionado) / "Intervalo personalizado" e o
   // botão "Exportar", que já dispara o download direto.
-  const confirmBtn = page.getByRole('button', { name: 'Exportar', exact: true }).last();
+  // IMPORTANTE: escopo o botão DENTRO do diálogo aberto (não a página
+  // inteira) — um debug-dom pego ao vivo mostrou o diálogo aberto de
+  // verdade bem na hora que o clique no "Exportar" travava, o que sugere
+  // que `page.getByRole('button', {name:'Exportar'}).last()` sem escopo
+  // podia estar mirando o elemento errado.
+  const exportDialog = page.getByRole('dialog').first();
+  await exportDialog.waitFor({ state: 'visible', timeout: 5000 });
+  const confirmBtn = exportDialog.getByRole('button', { name: 'Exportar', exact: true });
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: 15000 }),
     confirmBtn.click({ timeout: 8000, force: true }),
