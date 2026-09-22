@@ -339,6 +339,24 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     }
   });
 
+  // Diagnóstico: lê o DOM de verdade (não depende de renderização/compositor
+  // como o screenshot — os 3 debug-shots tirados vieram idênticos entre si em
+  // jobs diferentes, o que é bem suspeito; isso aqui não pode mentir do mesmo
+  // jeito). Sem auth de propósito simples de debug — remover depois.
+  app.get('/api/safer/whatsapp/debug-dom', requireAdminOrModerador, async (req, res) => {
+    try {
+      const page = await getWaPage();
+      const info = await page.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input[type="text"]'))
+          .map(i => ({ ariaLabel: i.getAttribute('aria-label'), value: i.value }));
+        return { url: location.href, title: document.title, inputs, bodyTextSample: document.body.innerText.slice(0, 1500) };
+      });
+      res.json(info);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/safer/whatsapp/import/start', requireAdminOrModerador, (req, res) => {
     const pauseSeconds = Math.max(5, Number(req.body?.pauseSeconds) || 8);
     const jobId = crypto.randomUUID();
