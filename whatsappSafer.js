@@ -261,7 +261,13 @@ async function exportContact(page, name) {
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
   const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
-  if (!hasExportItem) throw new Error('Item "Exportar conversa" não apareceu no menu.');
+  if (!hasExportItem) {
+    // Comunidades do WhatsApp não têm "Exportar conversa" — nunca vai
+    // funcionar, então não adianta tentar de novo nas rodadas seguintes.
+    const err = new Error('Item "Exportar conversa" não apareceu no menu (provavelmente é uma Comunidade).');
+    err.permanent = true;
+    throw err;
+  }
   await exportItem.click({ timeout: 8000, force: true });
   await page.waitForTimeout(500);
 
@@ -303,6 +309,46 @@ const shortErr = (err) => String(err?.message || err).split('\n')[0].slice(0, 16
 
 /* ── Loop principal do job ───────────────────────────────── */
 
+// Processa UM contato e devolve o resultado — usado tanto na passada
+// principal quanto nas retentativas do final.
+async function processContact(page, job, log, name) {
+  try {
+    const { buffer, filename } = await exportContact(page, name);
+    const fileIndex = job.files.length;
+    job.files.push({ buffer, filename });
+    log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
+    // Padrão visto em várias rodadas de teste: o contato logo depois de um
+    // sucesso tem mais chance de falhar — dá um respiro extra aqui.
+    await page.waitForTimeout(6000);
+    return { ok: true };
+  } catch (err) {
+    // Mensagem completa (com o call log do Playwright, que pode ter
+    // centenas de linhas) só no console/pm2 — no job.logs (que o frontend
+    // faz polling e renderiza a cada 2s) só a 1ª linha, resumida. Log
+    // gigante repetido travava o navegador do usuário (FPS caindo).
+    console.error(`[uniko-safer-wa] erro em "${name}":`, err.message);
+    log({ contactName: name, status: 'error', message: shortErr(err) });
+    if (!job.debugShot) job.debugShot = await page.screenshot().catch(() => null);
+    return { ok: false, permanent: !!err.permanent };
+  } finally {
+    // SEMPRE tenta voltar a um estado limpo antes do próximo contato,
+    // sucesso ou erro — sem isso, um contato que falhasse no meio do
+    // caminho (ex: diálogo travado) deixava a página numa posição ruim e
+    // TODOS os contatos seguintes falhavam igual, em cadeia.
+    await closeAnyDialog(page).catch(() => {});
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+}
+
+// WhatsApp Web ao vivo é imprevisível (mensagem real chegando o tempo
+// todo, grupos pesados, notas de voz) — nem sempre dá pra saber de
+// antemão por que um contato específico falhou. Em vez de tentar uma
+// vez só e desistir, quem falhar (e não for um erro permanente, tipo
+// Comunidade sem "Exportar conversa") entra numa fila e é tentado de
+// novo no final, depois de recarregar a página — várias rodadas curtas
+// em vez de uma só perfeita.
+const MAX_PASSES = 3;
+
 async function runWhatsappImport(jobId, pauseSeconds) {
   const job = waJobs.get(jobId);
   const log = (entry) => job.logs.push(entry);
@@ -332,59 +378,48 @@ async function runWhatsappImport(jobId, pauseSeconds) {
     job.total = names.length;
     log({ type: 'info', message: `${names.length} contato(s) encontrado(s) na barra lateral.` });
 
-    let consecutiveFailures = 0;
-    for (let i = 0; i < names.length; i++) {
-      if (job.stopRequested) {
-        log({ type: 'info', message: 'Interrompido pelo usuário.' });
-        break;
-      }
-      const name = names[i];
-      try {
-        const { buffer, filename } = await exportContact(page, name);
-        const fileIndex = job.files.length;
-        job.files.push({ buffer, filename });
-        log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
-        consecutiveFailures = 0;
-        // Padrão bem específico visto em várias rodadas: SEMPRE o contato
-        // logo depois de um sucesso falha (não importa qual seja) — suspeita
-        // de que o WhatsApp Web precisa de um tempo extra pra "assentar"
-        // depois de um download de verdade (sincronizando por trás com o
-        // celular). Testando uma pausa extra só depois de sucesso.
-        await page.waitForTimeout(6000);
-      } catch (err) {
-        // Mensagem completa (com o call log do Playwright, que pode ter
-        // centenas de linhas) só no console/pm2 — no job.logs (que o
-        // frontend faz polling e renderiza a cada 2s) só a 1ª linha, resumida.
-        // Log gigante repetido travava o navegador do usuário (FPS caindo).
-        console.error(`[uniko-safer-wa] erro em "${name}":`, err.message);
-        log({ contactName: name, status: 'error', message: shortErr(err) });
-        // Só a PRIMEIRA falha — é o momento mais útil pra diagnosticar (as
-        // seguintes tendem a ser efeito em cadeia da mesma coisa). Captura
-        // ANTES da limpeza do finally, senão perde exatamente o estado
-        // travado que a gente quer ver.
-        if (!job.debugShot) job.debugShot = await page.screenshot().catch(() => null);
-        consecutiveFailures++;
-      } finally {
-        // SEMPRE tenta voltar a um estado limpo antes do próximo contato,
-        // sucesso ou erro — sem isso, um contato que falhasse no meio do
-        // caminho (ex: diálogo travado) deixava a página numa posição ruim e
-        // TODOS os contatos seguintes falhavam igual, em cadeia.
-        await closeAnyDialog(page).catch(() => {});
-        await page.keyboard.press('Escape').catch(() => {});
-      }
-      // 2 falhas seguidas = a página provavelmente travou de vez por dentro
-      // (visto ao vivo: nesse caso NADA mais funciona até recarregar) — recarrega
-      // e dá um respiro antes de tentar o próximo, em vez de continuar
-      // batendo na mesma parede até o fim da lista.
-      if (consecutiveFailures >= 2) {
-        log({ type: 'info', message: 'Vários erros seguidos — recarregando o WhatsApp Web...' });
+    let pending = names;
+    for (let pass = 1; pass <= MAX_PASSES && pending.length && !job.stopRequested; pass++) {
+      if (pass > 1) {
+        log({ type: 'info', message: `Tentando de novo ${pending.length} contato(s) que falharam (rodada ${pass}/${MAX_PASSES})...` });
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         await page.waitForTimeout(3000);
-        consecutiveFailures = 0;
       }
-      if (i < names.length - 1 && !job.stopRequested) {
-        await new Promise((r) => setTimeout(r, pauseSeconds * 1000));
+
+      const failedThisPass = [];
+      let consecutiveFailures = 0;
+      for (let i = 0; i < pending.length; i++) {
+        if (job.stopRequested) {
+          log({ type: 'info', message: 'Interrompido pelo usuário.' });
+          break;
+        }
+        const name = pending[i];
+        const result = await processContact(page, job, log, name);
+        if (result.ok) {
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures++;
+          if (!result.permanent) failedThisPass.push(name);
+        }
+        // 2 falhas seguidas = a página provavelmente travou de vez por dentro
+        // (visto ao vivo: nesse caso nada mais funciona até recarregar) —
+        // recarrega e dá um respiro em vez de continuar batendo na mesma
+        // parede até o fim da lista.
+        if (consecutiveFailures >= 2) {
+          log({ type: 'info', message: 'Vários erros seguidos — recarregando o WhatsApp Web...' });
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          await page.waitForTimeout(3000);
+          consecutiveFailures = 0;
+        }
+        if (i < pending.length - 1 && !job.stopRequested) {
+          await new Promise((r) => setTimeout(r, pauseSeconds * 1000));
+        }
       }
+      pending = failedThisPass;
+    }
+
+    if (pending.length && !job.stopRequested) {
+      log({ type: 'info', message: `${pending.length} contato(s) não deram certo depois de ${MAX_PASSES} tentativas: ${pending.join(', ')}` });
     }
 
     job.status = job.status === 'error' ? job.status : 'done';
