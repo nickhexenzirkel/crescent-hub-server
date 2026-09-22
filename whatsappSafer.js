@@ -149,8 +149,10 @@ async function clearSearch(page) {
 // cabeçalhos de seção, avisos, contadores de não lidas, etc.
 const NON_CONTACT_ROW = /^(conversas|grupos em comum|arquivadas|fixadas|favoritas|não lidas)$/i;
 // Sem âncoras ^$ de propósito — visto ao vivo "1 mensagem não lida" passando
-// pelo filtro anterior (que exigia bater a linha inteira exatamente).
-const NON_CONTACT_PATTERN = /mensagens?\s+não\s+lidas?/i;
+// pelo filtro anterior (que exigia bater a linha inteira exatamente). Sem
+// exigir a palavra "mensagem" também — cobre variações tipo "1 não lida"
+// que o filtro anterior (que exigia "mensagens? não lidas?" junto) perdia.
+const NON_CONTACT_PATTERN = /não\s+lidas?/i;
 
 // Comunidades do WhatsApp (diferente de grupo comum) não têm "Exportar
 // conversa" — sempre falha, e o usuário pediu pra nem tentar. Lista fixa
