@@ -30,6 +30,12 @@ let waContext = null;
 let waPage    = null;
 const waJobs  = new Map(); // jobId → { status, logs, files, total, stopRequested, message }
 
+// Estado da sincronização automática periódica — "quem tinha essa aparência
+// da barra lateral na última vez que checamos". Só em memória (reseta se o
+// processo reiniciar); no pior caso, a primeira rodada depois de um restart
+// trata todo mundo como "mudou" e resincroniza geral uma vez, sem problema.
+const lastActivitySnapshot = new Map(); // nome → texto completo da linha
+
 /* ── Sessão persistente ──────────────────────────────────── */
 
 async function launchWa() {
@@ -179,6 +185,10 @@ const extractRowName = (text) =>
 // O grid da barra lateral é sempre o primeiro na página (fica à esquerda).
 const sidebarGrid = (page) => page.getByRole('grid').first();
 
+// Devolve { names, activity } — activity é um Map nome→texto completo da
+// linha (usado pela sincronização automática pra saber QUEM mudou desde a
+// última vez, sem precisar abrir cada conversa: se o texto da linha inteira
+// mudou — nova mensagem, novo horário — é sinal de atividade nova).
 async function collectSidebarNames(page) {
   await clearSearch(page);
   // Fecha qualquer conversa que tenha ficado aberta (reload não fecha
@@ -186,6 +196,7 @@ async function collectSidebarNames(page) {
   await page.keyboard.press('Escape').catch(() => {});
 
   const names = new Set();
+  const activity = new Map();
   let stableRounds = 0;
 
   for (let i = 0; i < 80 && stableRounds < 3; i++) {
@@ -194,13 +205,13 @@ async function collectSidebarNames(page) {
     for (const row of rows) {
       const text = await row.innerText().catch(() => '');
       const firstLine = extractRowName(text);
-      if (looksLikeContact(firstLine)) names.add(firstLine);
+      if (looksLikeContact(firstLine)) { names.add(firstLine); activity.set(firstLine, text); }
     }
     if (names.size === before) stableRounds++; else stableRounds = 0;
     await page.mouse.wheel(0, 800).catch(() => {});
     await page.waitForTimeout(400);
   }
-  return [...names];
+  return { names: [...names], activity };
 }
 
 /* ── Exportação de UMA conversa ──────────────────────────── */
@@ -399,22 +410,28 @@ async function processContact(page, job, log, name) {
 // em vez de uma só perfeita.
 const MAX_PASSES = 3;
 
-async function runWhatsappImport(jobId, pauseSeconds) {
+async function runWhatsappImport(jobId, pauseSeconds, onlyChanged = false) {
   const job = waJobs.get(jobId);
   const log = (entry) => job.logs.push(entry);
 
   try {
     const page = await getWaPage();
-    // Recarrega no início de CADA rodada. A página fica aberta o tempo todo
-    // entre uma rodada e outra (pra manter a sessão logada) — se o app do
-    // WhatsApp Web travar por dentro (SPA de anos rodando headless numa
-    // conta que recebe mensagem o tempo todo), ela fica visualmente parada
-    // pra sempre e NENHUM clique funciona mais, mesmo em rodadas futuras
-    // (confirmado: 2 screenshots de debug de jobs diferentes saíram
-    // byte-a-byte idênticos). Reload reinicia o app sem perder o login
-    // (a sessão do WhatsApp fica salva localmente, não depende do reload).
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    // Recarrega no início de CADA rodada MANUAL. A página fica aberta o
+    // tempo todo entre uma rodada e outra (pra manter a sessão logada) — se
+    // o app do WhatsApp Web travar por dentro (SPA de anos rodando headless
+    // numa conta que recebe mensagem o tempo todo), ela fica visualmente
+    // parada pra sempre e NENHUM clique funciona mais, mesmo em rodadas
+    // futuras (confirmado: 2 screenshots de debug de jobs diferentes saíram
+    // byte-a-byte idênticos). Reload reinicia o app sem perder o login (a
+    // sessão do WhatsApp fica salva localmente, não depende do reload).
+    // Na sincronização automática (onlyChanged), roda com frequência demais
+    // (a cada 1-2min) pra recarregar a página inteira toda vez — o
+    // recarregamento de recuperação em caso de erro (mais abaixo) já cobre
+    // o caso de travar de vez.
+    if (!onlyChanged) {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+    }
 
     const status = await getWaStatus();
     if (!status.loggedIn) {
@@ -424,11 +441,27 @@ async function runWhatsappImport(jobId, pauseSeconds) {
     }
 
     log({ type: 'info', message: 'Carregando lista de contatos...' });
-    const names = await collectSidebarNames(page);
-    job.total = names.length;
-    log({ type: 'info', message: `${names.length} contato(s) encontrado(s) na barra lateral.` });
+    const { names, activity } = await collectSidebarNames(page);
 
-    let pending = names;
+    let namesToProcess = names;
+    if (onlyChanged) {
+      // Só reprocessa quem mudou desde a última checagem (texto da linha
+      // inteira diferente = mensagem nova, ou pelo menos algo mudou ali).
+      // Primeira vez que roda (snapshot vazio) trata todo mundo como novo —
+      // é a sincronização "de base" antes de virar incremental.
+      const isFirstRun = lastActivitySnapshot.size === 0;
+      namesToProcess = isFirstRun ? names : names.filter(n => lastActivitySnapshot.get(n) !== activity.get(n));
+      for (const [n, text] of activity) lastActivitySnapshot.set(n, text);
+      log({ type: 'info', message: isFirstRun
+        ? `Primeira sincronização automática — verificando os ${names.length} contato(s).`
+        : `${namesToProcess.length} contato(s) com atividade nova (de ${names.length} no total).` });
+      if (!namesToProcess.length) { job.status = 'done'; return; }
+    }
+
+    job.total = namesToProcess.length;
+    if (!onlyChanged) log({ type: 'info', message: `${names.length} contato(s) encontrado(s) na barra lateral.` });
+
+    let pending = namesToProcess;
     for (let pass = 1; pass <= MAX_PASSES && pending.length && !job.stopRequested; pass++) {
       if (pass > 1) {
         log({ type: 'info', message: `Tentando de novo ${pending.length} contato(s) que falharam (rodada ${pass}/${MAX_PASSES})...` });
@@ -514,10 +547,13 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
 
   app.post('/api/safer/whatsapp/import/start', requireAdminOrModerador, (req, res) => {
     const pauseSeconds = Math.max(5, Number(req.body?.pauseSeconds) || 8);
+    // onlyChanged: modo "sincronização automática" — só reprocessa contatos
+    // com atividade nova desde a última checagem, em vez de todo mundo.
+    const onlyChanged = !!req.body?.onlyChanged;
     const jobId = crypto.randomUUID();
     waJobs.set(jobId, { status: 'running', logs: [], files: [], total: 0, stopRequested: false, message: null, debugShot: null });
     res.json({ jobId });
-    runWhatsappImport(jobId, pauseSeconds).catch((err) => {
+    runWhatsappImport(jobId, pauseSeconds, onlyChanged).catch((err) => {
       const j = waJobs.get(jobId);
       if (j) { j.status = 'error'; j.message = err.message; }
     });
