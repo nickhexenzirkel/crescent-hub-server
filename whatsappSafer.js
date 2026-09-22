@@ -278,7 +278,7 @@ async function exportContact(page, name) {
   await page.keyboard.press('Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
   await page.keyboard.type(name, { delay: 40 });
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(500);
 
   // A busca com uma conta movimentada traz várias seções (Conversas,
   // Contatos, Grupos em comum, Mensagens) — `hasText` (contém em qualquer
@@ -293,7 +293,7 @@ async function exportContact(page, name) {
   // parada de verdade, e isso queimava os 6s inteiros de espera em TODA
   // conversa (não só nas pesadas), sobrando pouco tempo pros cliques
   // seguintes. Espera fixa é mais previsível aqui.
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(1000);
 
   // Botão do cabeçalho da conversa chama "Mais opções" (não "Menu") — existe
   // outro "Mais opções" global perto do título "WhatsApp", por isso .last()
@@ -301,7 +301,7 @@ async function exportContact(page, name) {
   // padrão do Playwright) pra um contato travado não segurar o job inteiro.
   const menuBtn = page.getByRole('button', { name: /mais opções/i }).last();
   await step('abrir "Mais opções"', () => menuBtn.click({ timeout: 8000, force: true }));
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(200);
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
   const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
@@ -313,7 +313,7 @@ async function exportContact(page, name) {
     throw err;
   }
   await step('clicar "Exportar conversa" no menu', () => exportItem.click({ timeout: 8000, force: true }));
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(350);
 
   // Diálogo "Exportar conversa": não existe escolha de mídia nessa versão —
   // só "Todas as mensagens" (já selecionado) / "Intervalo personalizado" e o
@@ -366,9 +366,10 @@ async function processContact(page, job, log, name) {
     const fileIndex = job.files.length;
     job.files.push({ buffer, filename });
     log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
-    // Padrão visto em várias rodadas de teste: o contato logo depois de um
-    // sucesso tem mais chance de falhar — dá um respiro extra aqui.
-    await page.waitForTimeout(6000);
+    // Antes tinha 6s de espera extra aqui — era pra uma teoria (WhatsApp
+    // "assentando" depois do download) que não era a causa real do problema
+    // (era o seletor da busca perdendo o nome acessível, já corrigido). Sem
+    // motivo real pra segurar aqui além da pausa normal entre contatos.
     return { ok: true };
   } catch (err) {
     // Mensagem completa (com o call log do Playwright, que pode ter
