@@ -141,8 +141,14 @@ const NON_CONTACT_ROW = /^(conversas|grupos em comum|arquivadas|fixadas|favorita
 // pelo filtro anterior (que exigia bater a linha inteira exatamente).
 const NON_CONTACT_PATTERN = /mensagens?\s+não\s+lidas?/i;
 
+// Comunidades do WhatsApp (diferente de grupo comum) não têm "Exportar
+// conversa" — sempre falha, e o usuário pediu pra nem tentar. Lista fixa
+// porque não dá pra detectar "é Comunidade?" só pelo texto coletado.
+const HARD_SKIP_NAMES = ['CLUB'];
+
 const looksLikeContact = (text) =>
-  !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text);
+  !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text) &&
+  !HARD_SKIP_NAMES.includes(text);
 
 // Algumas linhas têm um caractere solto ANTES do nome de verdade (visto ao
 // vivo: "F\nFaturamento Antigo\n13:43\nFoto" virava o "contato" F) — ignora
