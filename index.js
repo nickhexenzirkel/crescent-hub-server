@@ -3784,6 +3784,13 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
+// UNIKO SAFER — Importação automática via WhatsApp Web
+// Lógica isolada em whatsappSafer.js (sessão Playwright persistente + rotas
+// de status/start/stop/download de arquivo) — ver esse arquivo pro detalhe.
+// ═══════════════════════════════════════════════════════
+require('./whatsappSafer')(app, { requireAdminOrModerador });
+
+// ═══════════════════════════════════════════════════════
 // PLAYWRIGHT — Download de vídeo para o Uniko Wave
 // yt-dlp falha em cloud IPs (PO token obrigatório desde 2024)
 // Playwright usa Chrome real → TLS fingerprint autentico → formatos disponíveis
