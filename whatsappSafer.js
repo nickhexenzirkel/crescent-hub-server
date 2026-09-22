@@ -105,7 +105,9 @@ async function getWaStatus() {
 async function clearSearch(page) {
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
   if (await searchBox.isVisible().catch(() => false)) {
-    await searchBox.fill('', { force: true }).catch(() => {});
+    await searchBox.click().catch(() => {});
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.press('Backspace').catch(() => {});
     await page.waitForTimeout(300);
   }
 }
@@ -166,15 +168,17 @@ async function closeAnyDialog(page) {
 async function exportContact(page, name) {
   await closeAnyDialog(page);
 
-  // `force: true` em todos os cliques abaixo: essa conta recebe mensagens
-  // reais o tempo todo (confirmado ao vivo), e cada mensagem nova reordena/
-  // redesenha a barra lateral — a checagem padrão do Playwright de "elemento
-  // parado" (sem se mover/redesenhar por alguns frames seguidos) pode nunca
-  // passar numa tela que se reorganiza sozinha o tempo todo. force pula essa
-  // checagem e clica direto na posição atual do elemento.
+  // Teclado de verdade (não .fill/force) pra digitar a busca — .fill com
+  // force pula os eventos que o WhatsApp escuta pra atualizar a busca de
+  // verdade; podia deixar o campo com o texto certo NA TELA mas o filtro
+  // interno do WhatsApp ainda respondendo à busca ANTERIOR (o usuário
+  // percebeu exatamente isso: as conversas que apareciam embaixo às vezes
+  // eram de uma busca diferente da que devia).
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
-  await searchBox.click({ timeout: 8000, force: true });
-  await searchBox.fill(name, { force: true });
+  await searchBox.click({ timeout: 8000 });
+  await page.keyboard.press('Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  await page.keyboard.type(name, { delay: 40 });
   await page.waitForTimeout(700);
 
   // A busca também traz "Grupos em comum" onde o contato só é MEMBRO (não é
@@ -218,9 +222,13 @@ async function exportContact(page, name) {
   const filename = download.suggestedFilename() || `${name}.txt`;
 
   // Garante que o diálogo de exportação fechou antes de seguir pro próximo
-  // contato (era o que travava tudo com "intercepts pointer events").
+  // contato (era o que travava tudo com "intercepts pointer events"). NÃO
+  // limpa a busca aqui — o próximo contato já sobrescreve o campo com
+  // .fill(name), e essa segunda limpeza forçada logo em seguida (mais a do
+  // finally do loop) suspeitamos que deixava o app do WhatsApp num estado
+  // interno inconsistente (padrão observado: sempre falhava bem no contato
+  // seguinte a um sucesso).
   await closeAnyDialog(page);
-  await clearSearch(page);
 
   return { buffer, filename };
 }
@@ -293,7 +301,6 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         // TODOS os contatos seguintes falhavam igual, em cadeia.
         await closeAnyDialog(page).catch(() => {});
         await page.keyboard.press('Escape').catch(() => {});
-        await clearSearch(page).catch(() => {});
       }
       // 2 falhas seguidas = a página provavelmente travou de vez por dentro
       // (visto ao vivo: nesse caso NADA mais funciona até recarregar) — recarrega
