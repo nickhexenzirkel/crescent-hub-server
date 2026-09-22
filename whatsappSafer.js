@@ -316,6 +316,12 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         job.files.push({ buffer, filename });
         log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
         consecutiveFailures = 0;
+        // Padrão bem específico visto em várias rodadas: SEMPRE o contato
+        // logo depois de um sucesso falha (não importa qual seja) — suspeita
+        // de que o WhatsApp Web precisa de um tempo extra pra "assentar"
+        // depois de um download de verdade (sincronizando por trás com o
+        // celular). Testando uma pausa extra só depois de sucesso.
+        await page.waitForTimeout(6000);
       } catch (err) {
         // Mensagem completa (com o call log do Playwright, que pode ter
         // centenas de linhas) só no console/pm2 — no job.logs (que o
