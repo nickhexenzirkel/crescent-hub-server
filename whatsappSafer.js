@@ -607,6 +607,55 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     }
   });
 
+  // Diagnóstico: abre a conversa EXATA (mesmo passo a passo do
+  // exportContact), clica em "Mais opções" e devolve o texto da tela + uma
+  // screenshot NESSE EXATO MOMENTO — sem clicar em "Exportar conversa" (só
+  // fecha tudo de novo no final). Serve pra ver de verdade o que aparece
+  // quando um contato normal (não Comunidade) é erroneamente classificado
+  // como Comunidade por não achar o item de exportar no menu.
+  // Remover depois de achado o bug.
+  app.get('/api/safer/whatsapp/debug-menu', requireAdminOrModerador, async (req, res) => {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Use ?name=Nome exato (igual aparece na barra lateral)' });
+    let page;
+    try {
+      page = await getWaPage();
+      await closeAnyDialog(page).catch(() => {});
+      const searchBox = searchBoxLocator(page);
+      await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
+      await page.keyboard.press('Control+A').catch(() => {});
+      await page.keyboard.press('Backspace').catch(() => {});
+      await page.keyboard.type(name, { delay: 40 });
+      await page.waitForTimeout(500);
+
+      const result = await findRowByExactName(page, name, 6000);
+      if (!result) return res.status(404).json({ error: 'Linha não encontrada na busca com esse nome exato.' });
+      await step('clicar no contato encontrado', () => result.click({ timeout: 8000, force: true }));
+      await page.waitForTimeout(1000);
+
+      const menuBtnLocator = page.getByRole('button', { name: /mais opções/i });
+      const menuButtonCount = await menuBtnLocator.count();
+      await step('abrir "Mais opções"', () => menuBtnLocator.last().click({ timeout: 8000, force: true }));
+      await page.waitForTimeout(400);
+
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      const screenshot = await page.screenshot();
+
+      await closeAnyDialog(page).catch(() => {});
+      await page.keyboard.press('Escape').catch(() => {});
+      await clearSearch(page);
+
+      res.json({
+        name, menuButtonCount,
+        bodyTextSample: bodyText.slice(0, 4000),
+        screenshotBase64: screenshot.toString('base64'),
+      });
+    } catch (err) {
+      if (page) await closeAnyDialog(page).catch(() => {});
+      res.status(500).json({ error: shortErr(err) });
+    }
+  });
+
   // Só marca o estado atual da barra lateral como "já visto", sem exportar
   // nada — é o que roda quando o usuário ATIVA o modo de sincronização
   // periódica, pra ele não disparar sem querer uma rodada completa de
