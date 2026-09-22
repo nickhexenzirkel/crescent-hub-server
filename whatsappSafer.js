@@ -115,7 +115,9 @@ async function clearSearch(page) {
 // Textos que aparecem como `row` na lista mas não são conversas de verdade —
 // cabeçalhos de seção, avisos, contadores de não lidas, etc.
 const NON_CONTACT_ROW = /^(conversas|grupos em comum|arquivadas|fixadas|favoritas|não lidas)$/i;
-const NON_CONTACT_PATTERN = /^\d+\s+mensagens?\s+não\s+lidas?$/i;
+// Sem âncoras ^$ de propósito — visto ao vivo "1 mensagem não lida" passando
+// pelo filtro anterior (que exigia bater a linha inteira exatamente).
+const NON_CONTACT_PATTERN = /mensagens?\s+não\s+lidas?/i;
 
 const looksLikeContact = (text) =>
   !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text);
