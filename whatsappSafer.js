@@ -92,17 +92,16 @@ async function getWaStatus() {
 // "Conversas"/"Grupos em comum" como se fossem linhas de contato) em vez da
 // lista completa de verdade. Era exatamente isso que fazia aparecer só 6
 // "contatos" com nomes tipo "Conversas" e "1 mensagem não lida".
+// Preferir `.fill('')` direto no campo em vez de caçar um botão "Fechar" —
+// "Fechar" é um nome perigosamente ambíguo nessa página (bate também com
+// "Fechar conversa" do menu "Mais opções" e com o X do aviso de notificações
+// desativadas), então um `getByRole('button', {name:/fechar/i})` sem escopo
+// específico podia acabar clicando na coisa errada.
 async function clearSearch(page) {
-  const clearBtn = page.getByRole('button', { name: /fechar/i }).first();
-  if (await clearBtn.isVisible().catch(() => false)) {
-    await clearBtn.click().catch(() => {});
-    await page.waitForTimeout(400);
-    return;
-  }
   const searchBox = page.getByRole('textbox', { name: /pesquisar/i }).first();
   if (await searchBox.isVisible().catch(() => false)) {
     await searchBox.fill('').catch(() => {});
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(300);
   }
 }
 
