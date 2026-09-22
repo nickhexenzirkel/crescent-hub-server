@@ -32,32 +32,54 @@ const waJobs  = new Map(); // jobId → { status, logs, files, total, stopReques
 
 /* ── Sessão persistente ──────────────────────────────────── */
 
+async function launchWa() {
+  waContext = await chromium.launchPersistentContext(WA_PROFILE_DIR, {
+    headless: true,
+    acceptDownloads: true,
+    // Sem isso, o Playwright usa um viewport pequeno (1280x720) por padrão
+    // — o WhatsApp Web tem breakpoints responsivos que mudam onde os
+    // botões ficam (ou escondem alguns atrás de um menu) em telas
+    // estreitas. Um tamanho de desktop "normal" evita isso.
+    viewport: { width: 1440, height: 900 },
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  });
+  waPage = waContext.pages()[0] || await waContext.newPage();
+  // Esconde navigator.webdriver — mesma técnica já usada no Playwright do yt-dlp
+  // (index.js) pra reduzir a chance de detecção de automação.
+  await waPage.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+  await waPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
+}
+
 async function getWaPage() {
-  if (!waContext) {
-    waContext = await chromium.launchPersistentContext(WA_PROFILE_DIR, {
-      headless: true,
-      acceptDownloads: true,
-      // Sem isso, o Playwright usa um viewport pequeno (1280x720) por padrão
-      // — o WhatsApp Web tem breakpoints responsivos que mudam onde os
-      // botões ficam (ou escondem alguns atrás de um menu) em telas
-      // estreitas. Um tamanho de desktop "normal" evita isso.
-      viewport: { width: 1440, height: 900 },
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    });
+  try {
+    if (!waContext) await launchWa();
+    if (!waPage || waPage.isClosed()) {
+      waPage = waContext.pages()[0] || await waContext.newPage();
+      await waPage.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
+    }
+    if (!waPage.url().includes('web.whatsapp.com')) {
+      await waPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
+    }
+    // Confere que o navegador está vivo de verdade — se alguém matar o
+    // processo do Chromium por fora (ex: `pkill`), `waContext`/`waPage`
+    // continuam existindo como OBJETOS na memória do Node, mas qualquer
+    // ação neles passa a falhar. `.isClosed()` não pega esse caso (o
+    // processo morreu, o objeto Playwright não sabe disso ainda).
+    await waPage.evaluate(() => true);
+    return waPage;
+  } catch (err) {
+    console.error('[uniko-safer-wa] sessão do WhatsApp Web morta, relançando:', err.message);
+    try { await waContext?.close(); } catch {}
+    waContext = null;
+    waPage = null;
+    await launchWa();
+    return waPage;
   }
-  if (!waPage || waPage.isClosed()) {
-    waPage = waContext.pages()[0] || await waContext.newPage();
-    // Esconde navigator.webdriver — mesma técnica já usada no Playwright do yt-dlp
-    // (index.js) pra reduzir a chance de detecção de automação.
-    await waPage.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-  }
-  if (!waPage.url().includes('web.whatsapp.com')) {
-    await waPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
-  }
-  return waPage;
 }
 
 // `.isVisible()` do Playwright NÃO espera — checa o estado NA HORA. Usar
