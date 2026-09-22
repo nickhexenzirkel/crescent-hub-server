@@ -37,6 +37,11 @@ async function getWaPage() {
     waContext = await chromium.launchPersistentContext(WA_PROFILE_DIR, {
       headless: true,
       acceptDownloads: true,
+      // Sem isso, o Playwright usa um viewport pequeno (1280x720) por padrão
+      // — o WhatsApp Web tem breakpoints responsivos que mudam onde os
+      // botões ficam (ou escondem alguns atrás de um menu) em telas
+      // estreitas. Um tamanho de desktop "normal" evita isso.
+      viewport: { width: 1440, height: 900 },
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     });
@@ -256,6 +261,11 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         // Log gigante repetido travava o navegador do usuário (FPS caindo).
         console.error(`[uniko-safer-wa] erro em "${name}":`, err.message);
         log({ contactName: name, status: 'error', message: shortErr(err) });
+        // Só a PRIMEIRA falha — é o momento mais útil pra diagnosticar (as
+        // seguintes tendem a ser efeito em cadeia da mesma coisa). Captura
+        // ANTES da limpeza do finally, senão perde exatamente o estado
+        // travado que a gente quer ver.
+        if (!job.debugShot) job.debugShot = await page.screenshot().catch(() => null);
       } finally {
         // SEMPRE tenta voltar a um estado limpo antes do próximo contato,
         // sucesso ou erro — sem isso, um contato que falhasse no meio do
@@ -295,7 +305,7 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
   app.post('/api/safer/whatsapp/import/start', requireAdminOrModerador, (req, res) => {
     const pauseSeconds = Math.max(5, Number(req.body?.pauseSeconds) || 8);
     const jobId = crypto.randomUUID();
-    waJobs.set(jobId, { status: 'running', logs: [], files: [], total: 0, stopRequested: false, message: null });
+    waJobs.set(jobId, { status: 'running', logs: [], files: [], total: 0, stopRequested: false, message: null, debugShot: null });
     res.json({ jobId });
     runWhatsappImport(jobId, pauseSeconds).catch((err) => {
       const j = waJobs.get(jobId);
@@ -307,6 +317,15 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     const job = waJobs.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job não encontrado (pode ter expirado).' });
     res.json({ status: job.status, logs: job.logs, total: job.total, message: job.message });
+  });
+
+  // Screenshot automático do momento exato do 1º erro de um job — só pra
+  // diagnóstico (remover depois que os seletores do WhatsApp Web estiverem
+  // estáveis).
+  app.get('/api/safer/whatsapp/import/:jobId/debug-shot', requireAdminOrModerador, (req, res) => {
+    const job = waJobs.get(req.params.jobId);
+    if (!job?.debugShot) return res.status(404).json({ error: 'Sem screenshot (nenhum erro nesse job ainda, ou já expirou).' });
+    res.type('png').send(job.debugShot);
   });
 
   app.get('/api/safer/whatsapp/import/:jobId/file/:idx', requireAdminOrModerador, (req, res) => {
