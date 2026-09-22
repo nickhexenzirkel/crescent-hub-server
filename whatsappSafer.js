@@ -169,11 +169,18 @@ const looksLikeContact = (text) =>
   !!text && !NON_CONTACT_ROW.test(text) && !NON_CONTACT_PATTERN.test(text) &&
   !HARD_SKIP_NAMES.includes(text);
 
-// Algumas linhas têm um caractere solto ANTES do nome de verdade (visto ao
-// vivo: "F\nFaturamento Antigo\n13:43\nFoto" virava o "contato" F) — ignora
-// linhas com menos de 2 caracteres ao decidir qual é o nome.
+// CAUSA RAIZ ACHADA AO VIVO (debug-search): num contato com mensagens não
+// lidas, o contador vem ANTES do nome no innerText da linha — ex:
+// "9 mensagens não lidas\nNicolas\n22:21\nfuon\n9". Sem pular essa linha
+// aqui, ela virava o "nome" extraído (1ª linha com 2+ caracteres) e
+// `looksLikeContact` corretamente reconhecia o padrão de "não lidas" e
+// descartava a linha INTEIRA — ou seja, todo contato com mensagem não lida
+// pendente (exatamente quem tem conteúdo novo pra sincronizar) nunca entrava
+// na varredura. Também ignora linhas com menos de 2 caracteres (visto ao
+// vivo: "F\nFaturamento Antigo\n13:43\nFoto" virava o "contato" F).
 const extractRowName = (text) =>
-  text.split('\n').map(l => l.trim()).find(l => l.length >= 2) || '';
+  text.split('\n').map(l => l.trim())
+    .find(l => l.length >= 2 && !NON_CONTACT_ROW.test(l) && !NON_CONTACT_PATTERN.test(l)) || '';
 
 // A barra lateral do WhatsApp Web é um grid (role="grid", "Lista de
 // conversas" fora de busca / "Resultados da pesquisa." durante busca) com
