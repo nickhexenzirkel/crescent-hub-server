@@ -237,6 +237,17 @@ async function runWhatsappImport(jobId, pauseSeconds) {
 
   try {
     const page = await getWaPage();
+    // Recarrega no início de CADA rodada. A página fica aberta o tempo todo
+    // entre uma rodada e outra (pra manter a sessão logada) — se o app do
+    // WhatsApp Web travar por dentro (SPA de anos rodando headless numa
+    // conta que recebe mensagem o tempo todo), ela fica visualmente parada
+    // pra sempre e NENHUM clique funciona mais, mesmo em rodadas futuras
+    // (confirmado: 2 screenshots de debug de jobs diferentes saíram
+    // byte-a-byte idênticos). Reload reinicia o app sem perder o login
+    // (a sessão do WhatsApp fica salva localmente, não depende do reload).
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
     const status = await getWaStatus();
     if (!status.loggedIn) {
       job.status = 'error';
@@ -249,6 +260,7 @@ async function runWhatsappImport(jobId, pauseSeconds) {
     job.total = names.length;
     log({ type: 'info', message: `${names.length} contato(s) encontrado(s) na barra lateral.` });
 
+    let consecutiveFailures = 0;
     for (let i = 0; i < names.length; i++) {
       if (job.stopRequested) {
         log({ type: 'info', message: 'Interrompido pelo usuário.' });
@@ -260,6 +272,7 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         const fileIndex = job.files.length;
         job.files.push({ buffer, filename });
         log({ contactName: name, fileIndex, status: 'ready', message: 'Exportado com sucesso.' });
+        consecutiveFailures = 0;
       } catch (err) {
         // Mensagem completa (com o call log do Playwright, que pode ter
         // centenas de linhas) só no console/pm2 — no job.logs (que o
@@ -272,6 +285,7 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         // ANTES da limpeza do finally, senão perde exatamente o estado
         // travado que a gente quer ver.
         if (!job.debugShot) job.debugShot = await page.screenshot().catch(() => null);
+        consecutiveFailures++;
       } finally {
         // SEMPRE tenta voltar a um estado limpo antes do próximo contato,
         // sucesso ou erro — sem isso, um contato que falhasse no meio do
@@ -280,6 +294,16 @@ async function runWhatsappImport(jobId, pauseSeconds) {
         await closeAnyDialog(page).catch(() => {});
         await page.keyboard.press('Escape').catch(() => {});
         await clearSearch(page).catch(() => {});
+      }
+      // 2 falhas seguidas = a página provavelmente travou de vez por dentro
+      // (visto ao vivo: nesse caso NADA mais funciona até recarregar) — recarrega
+      // e dá um respiro antes de tentar o próximo, em vez de continuar
+      // batendo na mesma parede até o fim da lista.
+      if (consecutiveFailures >= 2) {
+        log({ type: 'info', message: 'Vários erros seguidos — recarregando o WhatsApp Web...' });
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+        consecutiveFailures = 0;
       }
       if (i < names.length - 1 && !job.stopRequested) {
         await new Promise((r) => setTimeout(r, pauseSeconds * 1000));
