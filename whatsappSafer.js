@@ -566,6 +566,40 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     }
   });
 
+  // Diagnóstico: digita um termo na busca do WhatsApp Web (mesmo jeito que a
+  // exportação usa) e devolve o texto cru de TODAS as linhas que aparecerem —
+  // inclusive fora da lista normal da barra lateral (seções "Contatos",
+  // "Mensagens" etc. que a busca do WhatsApp mostra). Serve pra confirmar se
+  // essa sessão específica (o aparelho vinculado da VPS) sequer enxerga uma
+  // conversa que aparece normalmente em outro aparelho vinculado à mesma
+  // conta — coisa que a varredura normal da barra lateral não decide sozinha
+  // (só lista o que já está carregado, sem forçar uma busca de verdade).
+  // Sem side-effect: limpa a busca de novo no final. Remover depois de achado o bug.
+  app.get('/api/safer/whatsapp/debug-search', requireAdminOrModerador, async (req, res) => {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'Use ?q=termo (ex: ?q=Nicolas)' });
+    try {
+      const page = await getWaPage();
+      await closeAnyDialog(page).catch(() => {});
+      const searchBox = searchBoxLocator(page);
+      await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
+      await page.keyboard.press('Control+A').catch(() => {});
+      await page.keyboard.press('Backspace').catch(() => {});
+      await page.keyboard.type(q, { delay: 40 });
+      await page.waitForTimeout(800);
+      const rows = await page.getByRole('row').all();
+      const texts = [];
+      for (const row of rows) {
+        const text = await row.innerText().catch(() => '');
+        if (text) texts.push(text);
+      }
+      await clearSearch(page);
+      res.json({ query: q, count: texts.length, rows: texts });
+    } catch (err) {
+      res.status(500).json({ error: shortErr(err) });
+    }
+  });
+
   // Só marca o estado atual da barra lateral como "já visto", sem exportar
   // nada — é o que roda quando o usuário ATIVA o modo de sincronização
   // periódica, pra ele não disparar sem querer uma rodada completa de
