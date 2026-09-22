@@ -545,6 +545,24 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     }
   });
 
+  // Só marca o estado atual da barra lateral como "já visto", sem exportar
+  // nada — é o que roda quando o usuário ATIVA o modo de sincronização
+  // periódica, pra ele não disparar sem querer uma rodada completa de
+  // exportação de todo mundo (que é o que /import/start com onlyChanged
+  // faria na "primeira vez", com o snapshot ainda vazio).
+  app.post('/api/safer/whatsapp/sync/baseline', requireAdminOrModerador, async (req, res) => {
+    try {
+      const page = await getWaPage();
+      const status = await getWaStatus();
+      if (!status.loggedIn) return res.status(400).json({ error: 'WhatsApp Web não está logado — escaneie o QR Code primeiro.' });
+      const { activity } = await collectSidebarNames(page);
+      for (const [n, text] of activity) lastActivitySnapshot.set(n, text);
+      res.json({ ok: true, count: activity.size });
+    } catch (err) {
+      res.status(500).json({ error: shortErr(err) });
+    }
+  });
+
   app.post('/api/safer/whatsapp/import/start', requireAdminOrModerador, (req, res) => {
     const pauseSeconds = Math.max(5, Number(req.body?.pauseSeconds) || 8);
     // onlyChanged: modo "sincronização automática" — só reprocessa contatos
