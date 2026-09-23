@@ -80,6 +80,8 @@ function extractMessageContent(msg) {
     case 'reaction':     return { text: `[reagiu: ${msg.reaction?.emoji || ''}]`, msgType: 'reaction' };
     case 'button':       return { text: msg.button?.text || '[botão]', msgType: 'button' };
     case 'interactive':  return { text: msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '[resposta interativa]', msgType: 'interactive' };
+    case 'edit':         return { text: msg.edit?.message?.text?.body ? `(editada) ${msg.edit.message.text.body}` : '[mensagem editada]', msgType: 'edit' };
+    case 'media_placeholder': return { text: '[mídia — sincronização do histórico não trouxe o conteúdo]', msgType: 'media_placeholder' };
     default:             return { text: `[mensagem: ${msg.type || 'desconhecida'}]`, msgType: msg.type || 'other' };
   }
 }
@@ -156,6 +158,34 @@ async function processChange(value) {
   }
 }
 
+// Sincronização única do histórico (Coexistence) — formato BEM diferente do
+// resto: `value.history[].threads[]`, uma thread por contato, cada uma com
+// suas próprias `messages[]` (as SUAS e as DELE misturadas na mesma lista,
+// diferenciadas só por `history_context.from_me`). Confirmado olhando
+// payload real em uniko_security_webhook_raw (23/set/2026) — é bem diferente
+// do que a documentação da Meta sugeria (`value.messages` simples), por isso
+// nada disso estava sendo gravado até aqui. Sem nome de perfil nesse formato
+// (só wa_id) — `upsertContact` cai pro wa_id como nome, corrige sozinho
+// quando uma mensagem em tempo real com `contacts[].profile.name` chegar.
+async function processHistoryBackfill(value) {
+  const myNumber = value.metadata?.display_phone_number;
+  for (const block of value.history || []) {
+    for (const thread of block.threads || []) {
+      const waId = thread.context?.wa_id || thread.id;
+      if (!waId || waId === myNumber) continue; // pula a "conversa" do número com ele mesmo
+      let contact = null;
+      for (const msg of thread.messages || []) {
+        if (!contact) contact = await upsertContact(waId, null);
+        const { text, msgType } = extractMessageContent(msg);
+        await insertMessage({
+          contact, waMessageId: msg.id, sentAt: new Date(Number(msg.timestamp) * 1000).toISOString(),
+          direction: msg.history_context?.from_me ? 'out' : 'in', senderName: null, text, msgType,
+        });
+      }
+    }
+  }
+}
+
 module.exports = function registerWhatsappCloudApiRoutes(app) {
   // 1) Handshake de verificação — a Meta chama isso UMA VEZ quando você cola
   //    a URL do webhook no painel dela (WhatsApp → Configuration → Webhook).
@@ -188,11 +218,14 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
       for (const entry of payload.entry || []) {
         for (const change of entry.changes || []) {
           // 'history' é o campo real que o Coexistence usa tanto pra sincronização
-          // única (backfill de mensagens antigas) quanto pros echoes de mensagens
-          // mandadas pelo próprio app do celular — mesmo formato interno de
-          // 'messages' (`value.messages`/`value.message_echoes`), confirmado
-          // olhando payload real em uniko_security_webhook_raw (23/set/2026).
-          if (change.field === 'messages' || change.field === 'history') await processChange(change.value || {});
+          // única (backfill de mensagens antigas, formato `value.history[].threads[]`
+          // — bem diferente do resto) quanto pros echoes de mensagens mandadas pelo
+          // próprio app do celular (mesmo formato de 'messages', `value.message_echoes`)
+          // — confirmado olhando payload real em uniko_security_webhook_raw (23/set/2026).
+          if (change.field !== 'messages' && change.field !== 'history') continue;
+          const value = change.value || {};
+          if (Array.isArray(value.history)) await processHistoryBackfill(value);
+          else await processChange(value);
         }
       }
     } catch (err) {
