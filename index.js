@@ -117,7 +117,12 @@ app.options('*', cors());
 // Limite padrão do body-parser é 100kb — a Biblioteca Local manda a capa do
 // MP3 (extraída do ID3) como base64 dentro do JSON de POST /api/queue, e uma
 // capa embutida de tamanho normal já estoura isso sozinha (PayloadTooLargeError).
-app.use(express.json({ limit: '5mb' }));
+// `verify` guarda o corpo CRU em req.rawBody, sem afetar o parsing normal —
+// o webhook do Uniko Security (whatsappCloudApi.js) precisa dos bytes
+// originais pra conferir a assinatura HMAC que a Meta manda, e não dá pra
+// recalcular isso a partir do JSON já interpretado (reserialização não
+// reproduz byte a byte o corpo original).
+app.use(express.json({ limit: '5mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 // A Hostinger não serve estáticos de public/ no front-end (cai no fallback de SPA
 // pra qualquer extensão fora de uma lista curta) — serve daqui em vez disso
 // (ex.: /uniko-catbot.zip).
@@ -3789,6 +3794,13 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
 // de status/start/stop/download de arquivo) — ver esse arquivo pro detalhe.
 // ═══════════════════════════════════════════════════════
 require('./whatsappSafer')(app, { requireAdminOrModerador });
+
+// ═══════════════════════════════════════════════════════
+// UNIKO SECURITY — Webhook oficial da WhatsApp Cloud API (Coexistence)
+// Lógica isolada em whatsappCloudApi.js — sem robô de navegador, só recebe
+// o que a Meta manda e grava no Supabase. Ver esse arquivo pro detalhe.
+// ═══════════════════════════════════════════════════════
+require('./whatsappCloudApi')(app);
 
 // ═══════════════════════════════════════════════════════
 // PLAYWRIGHT — Download de vídeo para o Uniko Wave
