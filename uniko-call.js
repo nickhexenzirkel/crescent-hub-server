@@ -11,9 +11,10 @@
 // WhatsApp Web não expõe o número de telefone. Duas pessoas com nome igual
 // caem no mesmo contato — limitação conhecida da v1.
 //
-// Sem áudio bruto guardado (só a transcrição) — decisão deliberada pra não
-// precisar de bucket de Storage nem lidar com retenção de arquivo grande;
-// pode ser adicionado depois se precisar do áudio original por auditoria.
+// Guarda o ÁUDIO bruto também (bucket 'uniko-call', ver
+// supabase_uniko_call_audio.sql) — dá pra ouvir de volta na tela, não só
+// ler a transcrição. Upload do áudio e transcrição são passos
+// INDEPENDENTES: se o Groq falhar, o áudio já gravado continua ouvível.
 const { createClient } = require('@supabase/supabase-js');
 
 const UPLOAD_TOKEN = 'uniko-call-rec'; // mesmo token hardcoded do lado da extensão (offscreen.js)
@@ -45,6 +46,17 @@ async function transcribe(buffer, mimetype) {
   if (!res.ok) throw new Error(`Groq Whisper respondeu ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return data.text || '';
+}
+
+// Extensão do arquivo salvo bate com o que o MediaRecorder do offscreen.js
+// gera (audio/webm;codecs=opus) — sempre .webm, os navegadores tocam nativamente.
+async function uploadAudio(buffer, mimetype, recordingId) {
+  const path = `${recordingId}.webm`;
+  const { error } = await supabaseCall.storage.from('uniko-call')
+    .upload(path, buffer, { contentType: mimetype || 'audio/webm', upsert: true });
+  if (error) throw new Error(error.message);
+  const { data } = supabaseCall.storage.from('uniko-call').getPublicUrl(path);
+  return data.publicUrl;
 }
 
 async function upsertCallContact(name) {
@@ -83,6 +95,18 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     } catch (e) {
       console.error('[uniko-call] falha ao criar registro da chamada:', e.message);
       return;
+    }
+
+    // Áudio e transcrição são passos independentes — um falhar não derruba o
+    // outro. Sobe o áudio primeiro: mesmo se o Groq falhar, a chamada já fica
+    // ouvível na tela.
+    let audioUrl = null;
+    try {
+      audioUrl = await uploadAudio(req.file.buffer, req.file.mimetype, recording.id);
+      await supabaseCall.from('uniko_call_recordings')
+        .update({ audio_url: audioUrl }).eq('id', recording.id);
+    } catch (e) {
+      console.error('[uniko-call] falha ao subir o áudio:', e.message);
     }
 
     try {
