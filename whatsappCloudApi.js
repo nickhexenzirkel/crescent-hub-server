@@ -217,12 +217,15 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
     try {
       for (const entry of payload.entry || []) {
         for (const change of entry.changes || []) {
-          // 'history' é o campo real que o Coexistence usa tanto pra sincronização
-          // única (backfill de mensagens antigas, formato `value.history[].threads[]`
-          // — bem diferente do resto) quanto pros echoes de mensagens mandadas pelo
-          // próprio app do celular (mesmo formato de 'messages', `value.message_echoes`)
-          // — confirmado olhando payload real em uniko_security_webhook_raw (23/set/2026).
-          if (change.field !== 'messages' && change.field !== 'history') continue;
+          // 3 campos, confirmados olhando payload real em uniko_security_webhook_raw
+          // (23/set/2026) — bem diferente do que a documentação da Meta sugeria:
+          //  - 'messages': mensagem nova recebida (formato achatado de sempre)
+          //  - 'smb_message_echoes': mensagem nova ENVIADA pelo app do celular —
+          //    MESMO formato achatado (`value.message_echoes`), campo próprio,
+          //    NÃO é 'history' como o código assumia antes.
+          //  - 'history': só a sincronização ÚNICA de histórico antigo, formato
+          //    bem diferente e aninhado (`value.history[].threads[]`).
+          if (change.field !== 'messages' && change.field !== 'history' && change.field !== 'smb_message_echoes') continue;
           const value = change.value || {};
           if (Array.isArray(value.history)) await processHistoryBackfill(value);
           else await processChange(value);
