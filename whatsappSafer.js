@@ -322,13 +322,17 @@ async function exportContact(page, name) {
   await page.waitForTimeout(200);
 
   const exportItem = page.getByText('Exportar conversa', { exact: true }).first();
-  const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+  const hasExportItem = await exportItem.waitFor({ state: 'visible', timeout: 7000 }).then(() => true).catch(() => false);
   if (!hasExportItem) {
-    // Comunidades do WhatsApp não têm "Exportar conversa" — nunca vai
-    // funcionar, então não adianta tentar de novo nas rodadas seguintes.
-    const err = new Error('Item "Exportar conversa" não apareceu no menu (provavelmente é uma Comunidade).');
-    err.permanent = true;
-    throw err;
+    // CAUSA RAIZ ACHADA AO VIVO (debug-menu): um contato NORMAL (confirmado
+    // por screenshot) já falhou aqui por lentidão pontual pra o menu abrir —
+    // "Exportar conversa" estava lá, só demorou mais que o timeout antigo de
+    // 4s. Marcar como falha PERMANENTE nesse caso fazia desistir na hora sem
+    // nem tentar de novo, derrubando conversa de contato de verdade junto com
+    // as raras Comunidades reais (essas continuam caindo aqui, só que agora
+    // entram na fila de retentativa como qualquer outra falha passageira —
+    // Comunidades já conhecidas nem chegam a ser tentadas, ver HARD_SKIP_NAMES).
+    throw new Error('Item "Exportar conversa" não apareceu no menu (pode ser Comunidade, ou só lentidão — vai tentar de novo).');
   }
   await step('clicar "Exportar conversa" no menu', () => exportItem.click({ timeout: 8000, force: true }));
   await page.waitForTimeout(350);
