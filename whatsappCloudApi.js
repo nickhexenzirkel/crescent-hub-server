@@ -30,11 +30,21 @@
 // problema ao vivo.
 // ════════════════════════════════════════════════════════
 
-const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-const VERIFY_TOKEN = process.env.UNIKO_SECURITY_WEBHOOK_VERIFY_TOKEN || '';
-const APP_SECRET   = process.env.UNIKO_SECURITY_META_APP_SECRET || '';
+const VERIFY_TOKEN     = process.env.UNIKO_SECURITY_WEBHOOK_VERIFY_TOKEN || '';
+// Número foi conectado via Coexistence usando o Dualhook (BSP/Tech Provider —
+// nosso app "Uniko Security" sozinho não tem acesso a Coexistence, ver
+// decisão de set/2026). Isso muda quem ASSINA o webhook: o X-Hub-Signature-256
+// que a Meta manda é calculado com o App Secret do app do PRÓPRIO Dualhook,
+// não do nosso — não temos e nunca vamos ter esse segredo (a documentação
+// deles é explícita: "Meta app credentials are never disclosed"). Verificação
+// HMAC de assinatura, portanto, é IMPOSSÍVEL nessa integração — não é bug de
+// configuração. Seguindo a orientação oficial do próprio Dualhook ("validate
+// inbound webhook payload shape instead"), a autenticidade é conferida
+// conferindo se o payload é mesmo um evento do NOSSO WABA (object +
+// entry[].id) em vez de assinatura criptográfica.
+const WABA_ID = process.env.UNIKO_SECURITY_WABA_ID || '';
 
 let supabaseSecurity = null;
 if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABASE_SERVICE_KEY) {
@@ -46,16 +56,11 @@ if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABA
   console.warn('[uniko-security] UNIKO_SECURITY_SUPABASE_URL/SERVICE_KEY não configurados — webhook vai receber, mas não vai gravar nada.');
 }
 
-// Confere a assinatura HMAC-SHA256 do corpo CRU (precisa de req.rawBody —
-// ver o `verify` do express.json() em index.js). Sem isso, qualquer um que
-// descubra a URL do webhook poderia forjar mensagens no seu banco.
-function isValidSignature(req) {
-  const header = req.get('X-Hub-Signature-256') || '';
-  if (!APP_SECRET || !header.startsWith('sha256=') || !req.rawBody) return false;
-  const expected = 'sha256=' + crypto.createHmac('sha256', APP_SECRET).update(req.rawBody).digest('hex');
-  const a = Buffer.from(header);
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+function isValidPayload(body) {
+  if (!body || body.object !== 'whatsapp_business_account') return false;
+  if (!Array.isArray(body.entry) || !body.entry.length) return false;
+  if (WABA_ID && !body.entry.some(e => e.id === WABA_ID)) return false;
+  return true;
 }
 
 // Extrai um texto legível de qualquer tipo de mensagem que a Cloud API manda
@@ -156,7 +161,7 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
 
   // 2) Recebe cada mensagem nova.
   app.post('/api/security/webhook', async (req, res) => {
-    if (!isValidSignature(req)) return res.sendStatus(403);
+    if (!isValidPayload(req.body)) return res.sendStatus(403);
     // Responde 200 JÁ — a Meta reentrega (com backoff, por até dias) tudo
     // que não receber 200, então um erro de PROCESSAMENTO nosso não deve
     // virar reentrega infinita; o erro fica só registrado no log cru abaixo.
