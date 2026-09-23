@@ -210,6 +210,31 @@ async function processHistoryBackfill(value) {
   }
 }
 
+// Lista dos contatos SALVOS no celular do WhatsApp Business App (nome que o
+// próprio colaborador digitou, ex: "Altiery Vieira") — vem num evento
+// próprio, separado das mensagens. Achado ao vivo (23/set/2026): contatos
+// cuja 1ª mensagem chegou sem "nome de perfil" do WhatsApp (comum) ou só via
+// backfill de histórico (nunca tem nome nesse formato, ver
+// processHistoryBackfill) ficavam mostrando só o número — esse evento é
+// exatamente o que corrige isso, com o nome de verdade salvo no telefone.
+// Só ATUALIZA contato que já existe (por causa de mensagem de verdade) —
+// não cria contato novo só por estar na agenda (a agenda tem centenas de
+// números que nunca mandaram mensagem pra esse WhatsApp; criar todos
+// poluiria a lista de "conversas" com gente que nunca conversou).
+async function processAppStateSync(value) {
+  const category = categoryFor(value.metadata?.phone_number_id);
+  for (const item of value.state_sync || []) {
+    if (item.type !== 'contact') continue;
+    const waId = item.contact?.phone_number;
+    const name = item.contact?.full_name || item.contact?.first_name;
+    if (!waId || !name) continue;
+    const { data: existing } = await supabaseSecurity.from('uniko_security_contacts')
+      .select('id,name,name_manual').eq('wa_id', waId).eq('category', category).maybeSingle();
+    if (!existing || existing.name_manual || existing.name === name) continue;
+    await supabaseSecurity.from('uniko_security_contacts').update({ name }).eq('id', existing.id);
+  }
+}
+
 module.exports = function registerWhatsappCloudApiRoutes(app) {
   // 1) Handshake de verificação — a Meta chama isso UMA VEZ quando você cola
   //    a URL do webhook no painel dela (WhatsApp → Configuration → Webhook).
@@ -241,7 +266,7 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
     try {
       for (const entry of payload.entry || []) {
         for (const change of entry.changes || []) {
-          // 3 campos, confirmados olhando payload real em uniko_security_webhook_raw
+          // 4 campos, confirmados olhando payload real em uniko_security_webhook_raw
           // (23/set/2026) — bem diferente do que a documentação da Meta sugeria:
           //  - 'messages': mensagem nova recebida (formato achatado de sempre)
           //  - 'smb_message_echoes': mensagem nova ENVIADA pelo app do celular —
@@ -249,9 +274,12 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
           //    NÃO é 'history' como o código assumia antes.
           //  - 'history': só a sincronização ÚNICA de histórico antigo, formato
           //    bem diferente e aninhado (`value.history[].threads[]`).
-          if (change.field !== 'messages' && change.field !== 'history' && change.field !== 'smb_message_echoes') continue;
+          //  - 'smb_app_state_sync': lista de contatos SALVOS no celular
+          //    (`value.state_sync[]`) — usada só pra corrigir o NOME exibido.
+          if (!['messages', 'history', 'smb_message_echoes', 'smb_app_state_sync'].includes(change.field)) continue;
           const value = change.value || {};
           if (Array.isArray(value.history)) await processHistoryBackfill(value);
+          else if (Array.isArray(value.state_sync)) await processAppStateSync(value);
           else await processChange(value);
         }
       }
@@ -274,3 +302,4 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
 // uniko_security_webhook_raw (ex.: replay-history-backfill.js) sem duplicar
 // a lógica de extração.
 module.exports.processHistoryBackfill = processHistoryBackfill;
+module.exports.processAppStateSync = processAppStateSync;

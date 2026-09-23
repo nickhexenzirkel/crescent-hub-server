@@ -1,17 +1,22 @@
-// Reprocessa payloads de backfill de histórico (Coexistence) que já estão
-// salvos em uniko_security_webhook_raw mas foram recebidos ANTES do fix que
-// ensinou o código a entender o formato `value.history[].threads[]` — sem
-// isso, essas mensagens antigas (e as SUAS, via history_context.from_me)
-// nunca apareceriam, e a Meta não reenvia webhook que já recebeu 200.
+// Reprocessa payloads antigos já salvos em uniko_security_webhook_raw que
+// chegaram ANTES de algum fix no parser — a Meta não reenvia webhook que já
+// recebeu 200, então esse é o único jeito de recuperar esse dado sem
+// esperar um evento novo. Cobre 2 casos:
+//  - backfill de histórico (`value.history[].threads[]`) — mensagens e
+//    contatos antigos que nunca tinham sido entendidos.
+//  - sincronização de contatos salvos (`value.state_sync[]`) — corrige
+//    contato que ficou mostrando só o número em vez do nome salvo no
+//    celular (fix de 23/set/2026).
 //
 // Rodar UMA VEZ na VPS, na pasta do crescent-hub-server:
 //   node replay-history-backfill.js
 //
-// Idempotente: insertMessage já faz upsert por wa_message_id, então rodar
-// de novo por engano não duplica nada.
+// Idempotente: pode rodar de novo à vontade sem duplicar nada
+// (insertMessage faz upsert por wa_message_id; processAppStateSync só
+// atualiza contato que já existe).
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
-const { processHistoryBackfill } = require('./whatsappCloudApi');
+const { processHistoryBackfill, processAppStateSync } = require('./whatsappCloudApi');
 
 const supabase = createClient(
   process.env.UNIKO_SECURITY_SUPABASE_URL,
@@ -25,23 +30,23 @@ const supabase = createClient(
     .order('id', { ascending: true });
   if (error) { console.error('Erro buscando payloads:', error.message); process.exit(1); }
 
-  let found = 0, done = 0;
+  let foundHistory = 0, doneHistory = 0, foundSync = 0, doneSync = 0;
   for (const row of rows || []) {
     for (const entry of row.payload?.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value || {};
-        if (!Array.isArray(value.history)) continue;
-        found++;
-        try {
-          await processHistoryBackfill(value);
-          done++;
-          console.log(`✅ raw id=${row.id} reprocessado`);
-        } catch (e) {
-          console.error(`❌ raw id=${row.id} falhou:`, e.message);
+        if (Array.isArray(value.history)) {
+          foundHistory++;
+          try { await processHistoryBackfill(value); doneHistory++; console.log(`✅ histórico raw id=${row.id} reprocessado`); }
+          catch (e) { console.error(`❌ histórico raw id=${row.id} falhou:`, e.message); }
+        } else if (Array.isArray(value.state_sync)) {
+          foundSync++;
+          try { await processAppStateSync(value); doneSync++; console.log(`✅ contatos raw id=${row.id} reprocessado`); }
+          catch (e) { console.error(`❌ contatos raw id=${row.id} falhou:`, e.message); }
         }
       }
     }
   }
-  console.log(`\nFim: ${done}/${found} payloads de backfill reprocessados.`);
+  console.log(`\nFim: ${doneHistory}/${foundHistory} payloads de histórico + ${doneSync}/${foundSync} payloads de contatos reprocessados.`);
   process.exit(0);
 })();
