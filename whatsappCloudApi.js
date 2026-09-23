@@ -242,3 +242,8 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
     }
   });
 };
+
+// Exposto à parte pra dar pra reprocessar payloads antigos já salvos em
+// uniko_security_webhook_raw (ex.: replay-history-backfill.js) sem duplicar
+// a lógica de extração.
+module.exports.processHistoryBackfill = processHistoryBackfill;
