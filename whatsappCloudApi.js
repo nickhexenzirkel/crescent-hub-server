@@ -100,12 +100,22 @@ async function upsertContact(waId, profileName) {
   return data;
 }
 
+// A Meta manda dois webhooks pro MESMO wa_message_id quando o lado da API não
+// confirma o conteúdo a tempo (comum no Coexistence): primeiro o conteúdo
+// real (ex.: type:"text"), depois um type:"unsupported"/erro 131060 "This
+// message is unavailable" — a ORDEM de chegada não é garantida. Achado ao
+// vivo (23/set/2026): um "oi" (texto normal) ficou gravado como
+// "[mensagem: unsupported]" porque a versão ruim chegou primeiro e
+// `ignoreDuplicates` trava no primeiro que chega, bom ou ruim. Fix: mensagem
+// de verdade sempre SOBRESCREVE um "unsupported" antigo (upsert normal);
+// "unsupported" NUNCA sobrescreve conteúdo bom que já esteja gravado
+// (ignoreDuplicates), só preenche se ainda não existir nada pra esse id.
 async function insertMessage({ contact, waMessageId, sentAt, direction, senderName, text, msgType }) {
   const { error } = await supabaseSecurity.from('uniko_security_messages')
     .upsert({
       contact_id: contact.id, wa_message_id: waMessageId || null, sent_at: sentAt,
       direction, sender_name: senderName || null, text, msg_type: msgType,
-    }, { onConflict: 'wa_message_id', ignoreDuplicates: true });
+    }, { onConflict: 'wa_message_id', ignoreDuplicates: msgType === 'unsupported' });
   if (error) throw new Error(error.message);
   if (!contact.last_message_at || sentAt > contact.last_message_at) {
     await supabaseSecurity.from('uniko_security_contacts').update({ last_message_at: sentAt }).eq('id', contact.id);
@@ -177,7 +187,12 @@ module.exports = function registerWhatsappCloudApiRoutes(app) {
     try {
       for (const entry of payload.entry || []) {
         for (const change of entry.changes || []) {
-          if (change.field === 'messages') await processChange(change.value || {});
+          // 'history' é o campo real que o Coexistence usa tanto pra sincronização
+          // única (backfill de mensagens antigas) quanto pros echoes de mensagens
+          // mandadas pelo próprio app do celular — mesmo formato interno de
+          // 'messages' (`value.messages`/`value.message_echoes`), confirmado
+          // olhando payload real em uniko_security_webhook_raw (23/set/2026).
+          if (change.field === 'messages' || change.field === 'history') await processChange(change.value || {});
         }
       }
     } catch (err) {
