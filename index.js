@@ -3803,6 +3803,14 @@ require('./whatsappSafer')(app, { requireAdminOrModerador });
 require('./whatsappCloudApi')(app);
 
 // ═══════════════════════════════════════════════════════
+// UNIKO CALL — recebe o áudio de chamada do WhatsApp Web gravado pela
+// extensão Cat-Bot, transcreve (Groq Whisper) e grava como "conversa".
+// Lógica isolada em uniko-call.js.
+// ═══════════════════════════════════════════════════════
+const unikoCallUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
+require('./uniko-call')(app, unikoCallUpload);
+
+// ═══════════════════════════════════════════════════════
 // PLAYWRIGHT — Download de vídeo para o Uniko Wave
 // yt-dlp falha em cloud IPs (PO token obrigatório desde 2024)
 // Playwright usa Chrome real → TLS fingerprint autentico → formatos disponíveis
