@@ -75,9 +75,10 @@ function decryptBackup(buf) {
 // mostrar uma barra de verdade na tela (backup completo com mídia demora
 // bastante, achado ao vivo 24/set/2026 — sem isso o admin fica olhando um
 // texto parado "Gerando backup completo…" sem saber se travou ou não).
-async function buildBackupPayload({ scope, contactId }, onProgress) {
+async function buildBackupPayload({ scope, contactId, category }, onProgress) {
   let q = supabaseSecurity.from('uniko_security_contacts').select('*').order('name');
   if (scope === 'contact') q = q.eq('id', contactId);
+  else if (scope === 'category') q = q.eq('category', category);
   const { data: contacts, error: ce } = await q;
   if (ce) throw new Error(ce.message);
 
@@ -112,7 +113,7 @@ async function buildBackupPayload({ scope, contactId }, onProgress) {
     done++;
     onProgress?.(done, total);
   }
-  return { version: 1, generatedAt: new Date().toISOString(), scope, contactId: contactId || null, contacts: out };
+  return { version: 1, generatedAt: new Date().toISOString(), scope, contactId: contactId || null, category: category || null, contacts: out };
 }
 
 // jobId → { status: 'running'|'done'|'error', error, filePath, createdAt }
@@ -123,9 +124,10 @@ const TMP_DIR = path.join(os.tmpdir(), 'uniko-security-backups');
 module.exports = function registerBackupRoutes(app, { requireAdmin }) {
   app.post('/api/security/backup/start', requireAdmin, (req, res) => {
     if (!BACKUP_KEY || !supabaseSecurity) return res.status(500).json({ error: 'Backup não configurado no servidor (falta UNIKO_SECURITY_BACKUP_KEY ou Supabase).' });
-    const { scope, contactId } = req.body || {};
-    if (scope !== 'all' && scope !== 'contact') return res.status(400).json({ error: 'scope inválido' });
+    const { scope, contactId, category } = req.body || {};
+    if (!['all', 'contact', 'category'].includes(scope)) return res.status(400).json({ error: 'scope inválido' });
     if (scope === 'contact' && !contactId) return res.status(400).json({ error: 'contactId obrigatório pra scope=contact' });
+    if (scope === 'category' && !category) return res.status(400).json({ error: 'category obrigatório pra scope=category' });
 
     const jobId = newJobId();
     jobs.set(jobId, { status: 'running', error: null, filePath: null, createdAt: Date.now(), progress: { done: 0, total: 0 } });
@@ -133,7 +135,7 @@ module.exports = function registerBackupRoutes(app, { requireAdmin }) {
 
     (async () => {
       try {
-        const payload = await buildBackupPayload({ scope, contactId }, (done, total) => {
+        const payload = await buildBackupPayload({ scope, contactId, category }, (done, total) => {
           const job = jobs.get(jobId);
           if (job) job.progress = { done, total };
         });
