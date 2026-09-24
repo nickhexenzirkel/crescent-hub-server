@@ -215,14 +215,28 @@ async function upsertContact(waId, profileName, category) {
     }
     return existing;
   }
-  // Contato novo: upsert ATÔMICO (não INSERT simples) — corrige uma corrida
-  // real (achado nos logs quando o Financeiro foi conectado): duas mensagens
-  // quase simultâneas do MESMO contato ainda-não-existente faziam os dois
-  // SELECTs acima acharem "não existe" e os dois tentarem INSERT — o segundo
-  // batia na trava única (wa_id, category). onConflict resolve isso no
-  // banco, sem corrida possível.
+  // Contato novo: prefere o nome salvo na AGENDA do celular
+  // (uniko_security_known_names, vindo do smb_app_state_sync) sobre o nome
+  // de PERFIL do próprio contato (profileName, que é o nome/status que ELE
+  // escolheu no WhatsApp dele, não o que o setor salvou) — é o que o usuário
+  // espera ver ("já está salvo no WhatsApp normal"). Cai pro número só se
+  // nenhum dos dois existir. Ver comentário em processAppStateSync sobre por
+  // que isso precisa ficar numa tabela à parte, não só "atualizar se já
+  // existir".
+  let knownName = null;
+  try {
+    const { data: known } = await supabaseSecurity.from('uniko_security_known_names')
+      .select('name').eq('wa_id', waId).eq('category', category).maybeSingle();
+    knownName = known?.name || null;
+  } catch {}
+  // Upsert ATÔMICO (não INSERT simples) — corrige uma corrida real (achado
+  // nos logs quando o Financeiro foi conectado): duas mensagens quase
+  // simultâneas do MESMO contato ainda-não-existente faziam os dois SELECTs
+  // acima acharem "não existe" e os dois tentarem INSERT — o segundo batia na
+  // trava única (wa_id, category). onConflict resolve isso no banco, sem
+  // corrida possível.
   const { data, error } = await supabaseSecurity.from('uniko_security_contacts')
-    .upsert({ wa_id: waId, name: profileName || waId, category }, { onConflict: 'wa_id,category' })
+    .upsert({ wa_id: waId, name: knownName || profileName || waId, category }, { onConflict: 'wa_id,category' })
     .select().single();
   if (error) throw new Error(error.message);
   return data;
@@ -323,10 +337,16 @@ async function processHistoryBackfill(value) {
 // backfill de histórico (nunca tem nome nesse formato, ver
 // processHistoryBackfill) ficavam mostrando só o número — esse evento é
 // exatamente o que corrige isso, com o nome de verdade salvo no telefone.
-// Só ATUALIZA contato que já existe (por causa de mensagem de verdade) —
-// não cria contato novo só por estar na agenda (a agenda tem centenas de
+// NÃO cria contato novo só por estar na agenda (a agenda tem centenas de
 // números que nunca mandaram mensagem pra esse WhatsApp; criar todos
-// poluiria a lista de "conversas" com gente que nunca conversou).
+// poluiria a lista de "conversas" com gente que nunca conversou) — mas
+// GUARDA o nome numa tabela à parte (uniko_security_known_names) sempre,
+// mesmo pra quem ainda não é contato aqui. Achado ao vivo (conexão do
+// Financeiro): esse evento costuma chegar de uma vez só, logo no começo,
+// ANTES da maioria das pessoas ter mandado a 1ª mensagem — sem essa tabela,
+// o nome se perdia pra sempre (só atualizava quem JÁ existia NAQUELE
+// instante) e o contato ficava mostrando só o número quando fosse criado
+// depois. `upsertContact` consulta essa tabela na hora de criar.
 async function processAppStateSync(value) {
   const category = categoryFor(value.metadata?.phone_number_id);
   for (const item of value.state_sync || []) {
@@ -334,6 +354,8 @@ async function processAppStateSync(value) {
     const waId = item.contact?.phone_number;
     const name = item.contact?.full_name || item.contact?.first_name;
     if (!waId || !name) continue;
+    await supabaseSecurity.from('uniko_security_known_names')
+      .upsert({ wa_id: waId, category, name, updated_at: new Date().toISOString() }, { onConflict: 'wa_id,category' });
     const { data: existing } = await supabaseSecurity.from('uniko_security_contacts')
       .select('id,name,name_manual').eq('wa_id', waId).eq('category', category).maybeSingle();
     if (!existing || existing.name_manual || existing.name === name) continue;
