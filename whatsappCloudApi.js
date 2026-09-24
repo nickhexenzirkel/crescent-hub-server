@@ -184,8 +184,15 @@ async function upsertContact(waId, profileName, category) {
     }
     return existing;
   }
+  // Contato novo: upsert ATÔMICO (não INSERT simples) — corrige uma corrida
+  // real (achado nos logs quando o Financeiro foi conectado): duas mensagens
+  // quase simultâneas do MESMO contato ainda-não-existente faziam os dois
+  // SELECTs acima acharem "não existe" e os dois tentarem INSERT — o segundo
+  // batia na trava única (wa_id, category). onConflict resolve isso no
+  // banco, sem corrida possível.
   const { data, error } = await supabaseSecurity.from('uniko_security_contacts')
-    .insert({ wa_id: waId, name: profileName || waId, category }).select().single();
+    .upsert({ wa_id: waId, name: profileName || waId, category }, { onConflict: 'wa_id,category' })
+    .select().single();
   if (error) throw new Error(error.message);
   return data;
 }
