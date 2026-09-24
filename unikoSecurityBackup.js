@@ -71,11 +71,19 @@ function decryptBackup(buf) {
 // Busca contatos + mensagens (e baixa cada mídia referenciada, embutindo em
 // base64 — o backup fica autocontido, não depende do bucket público
 // continuar existindo pra sempre).
-async function buildBackupPayload({ scope, contactId }) {
+// `onProgress(done, total)` — chamado a cada contato processado, pra dar pra
+// mostrar uma barra de verdade na tela (backup completo com mídia demora
+// bastante, achado ao vivo 24/set/2026 — sem isso o admin fica olhando um
+// texto parado "Gerando backup completo…" sem saber se travou ou não).
+async function buildBackupPayload({ scope, contactId }, onProgress) {
   let q = supabaseSecurity.from('uniko_security_contacts').select('*').order('name');
   if (scope === 'contact') q = q.eq('id', contactId);
   const { data: contacts, error: ce } = await q;
   if (ce) throw new Error(ce.message);
+
+  const total = contacts?.length || 0;
+  let done = 0;
+  onProgress?.(done, total);
 
   const out = [];
   for (const c of contacts || []) {
@@ -101,6 +109,8 @@ async function buildBackupPayload({ scope, contactId }) {
       });
     }
     out.push({ id: c.id, waId: c.wa_id, name: c.name, category: c.category, notes: c.notes, messages });
+    done++;
+    onProgress?.(done, total);
   }
   return { version: 1, generatedAt: new Date().toISOString(), scope, contactId: contactId || null, contacts: out };
 }
@@ -118,12 +128,15 @@ module.exports = function registerBackupRoutes(app, { requireAdmin }) {
     if (scope === 'contact' && !contactId) return res.status(400).json({ error: 'contactId obrigatório pra scope=contact' });
 
     const jobId = newJobId();
-    jobs.set(jobId, { status: 'running', error: null, filePath: null, createdAt: Date.now() });
+    jobs.set(jobId, { status: 'running', error: null, filePath: null, createdAt: Date.now(), progress: { done: 0, total: 0 } });
     res.json({ jobId });
 
     (async () => {
       try {
-        const payload = await buildBackupPayload({ scope, contactId });
+        const payload = await buildBackupPayload({ scope, contactId }, (done, total) => {
+          const job = jobs.get(jobId);
+          if (job) job.progress = { done, total };
+        });
         const buf = encryptBackup(payload);
         await fsp.mkdir(TMP_DIR, { recursive: true });
         const filePath = path.join(TMP_DIR, `${jobId}.ukbak`);
@@ -139,7 +152,7 @@ module.exports = function registerBackupRoutes(app, { requireAdmin }) {
   app.get('/api/security/backup/status/:jobId', requireAdmin, (req, res) => {
     const job = jobs.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'job não encontrado (pode já ter expirado — baixe em até 1h)' });
-    res.json({ status: job.status, error: job.error });
+    res.json({ status: job.status, error: job.error, progress: job.progress || null });
   });
 
   app.get('/api/security/backup/download/:jobId', requireAdmin, (req, res) => {
@@ -163,8 +176,21 @@ module.exports = function registerBackupRoutes(app, { requireAdmin }) {
   }, 15 * 60 * 1000);
 
   // Importar/ler um .ukbak baixado antes — só este servidor sabe decifrar.
-  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 300 * 1024 * 1024 } });
-  app.post('/api/security/backup/decrypt', requireAdmin, upload.single('file'), async (req, res) => {
+  // Limite generoso (2GB) — achado ao vivo 24/set/2026: um backup completo
+  // com mídia de verdade passa longe dos 300MB do limite antigo. Multer
+  // rejeitando por tamanho ANTES da rota rodar fazia a conexão morrer sem
+  // resposta HTTP de verdade — o navegador reportava isso como "bloqueado
+  // pelo CORS" (sintoma enganoso comum: falha de baixo nível vira erro de
+  // CORS na tela, mesmo o CORS estando configurado certo). Agora o erro do
+  // multer é pego explicitamente e vira uma resposta JSON normal.
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } });
+  app.post('/api/security/backup/decrypt', requireAdmin, (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (!err) return next();
+      console.error('[uniko-security-backup] falha no upload pra decifrar:', err.message);
+      res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Arquivo maior que o limite permitido (2GB).' : `Falha no upload: ${err.message}` });
+    });
+  }, async (req, res) => {
     if (!BACKUP_KEY) return res.status(500).json({ error: 'Backup não configurado no servidor.' });
     if (!req.file) return res.status(400).json({ error: 'nenhum arquivo recebido' });
     try {
