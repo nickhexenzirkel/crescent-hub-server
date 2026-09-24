@@ -16,9 +16,11 @@
 // ler a transcrição. Upload do áudio e transcrição são passos
 // INDEPENDENTES: se o Groq falhar, o áudio já gravado continua ouvível.
 const { createClient } = require('@supabase/supabase-js');
+const { spawn } = require('child_process');
 
 const UPLOAD_TOKEN = 'uniko-call-rec'; // mesmo token hardcoded do lado da extensão (offscreen.js)
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
+const TRANSCRIBE_TIMEOUT_MS = 3 * 60 * 1000; // Groq nunca fica pendurado pra sempre — timeout vira erro claro
 
 // Aviso prévio de gravação (LGPD) — o servidor busca essa frase (config via
 // env, sem precisar redeploy) na transcrição do Whisper. Detecção por
@@ -65,14 +67,51 @@ async function transcribe(buffer, mimetype) {
   form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), 'call.webm');
   form.append('model', 'whisper-large-v3');
   form.append('language', 'pt');
-  const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${GROQ_KEY}` },
-    body: form,
-  });
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${GROQ_KEY}` },
+      body: form,
+      signal: ac.signal,
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`Groq Whisper não respondeu em ${TRANSCRIBE_TIMEOUT_MS / 1000}s (timeout)`);
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
   if (!res.ok) throw new Error(`Groq Whisper respondeu ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return data.text || '';
+}
+
+// O MediaRecorder do Chrome grava um .webm sem os metadados de duração no
+// container (bug conhecido) — toca sem parar de estar em 0:00 no player.
+// Remuxa (copia os streams, sem recodificar — rápido) via ffmpeg antes de
+// guardar/transcrever: corrige a duração pro player E dá pro Whisper um
+// arquivo mais "limpo" de ler. Se falhar por qualquer motivo, segue com o
+// buffer original (áudio ainda toca/transcreve, só sem a correção).
+function remuxWebm(buffer) {
+  return new Promise((resolve) => {
+    const ff = spawn('ffmpeg', ['-i', 'pipe:0', '-c', 'copy', '-f', 'webm', 'pipe:1']);
+    const out = [];
+    let err = '';
+    ff.stdout.on('data', (d) => out.push(d));
+    ff.stderr.on('data', (d) => { err += d.toString(); });
+    ff.on('error', (e) => { console.error('[uniko-call] ffmpeg indisponível, seguindo sem remux:', e.message); resolve(buffer); });
+    ff.on('close', (code) => {
+      if (code !== 0 || !out.length) {
+        console.error(`[uniko-call] remux falhou (code ${code}), seguindo com o áudio original: ${err.slice(-300)}`);
+        return resolve(buffer);
+      }
+      resolve(Buffer.concat(out));
+    });
+    ff.stdin.on('error', () => {}); // EPIPE se o ffmpeg já morreu — o 'close' acima trata o resultado
+    ff.stdin.end(buffer);
+  });
 }
 
 // Extensão do arquivo salvo bate com o que o MediaRecorder do offscreen.js
@@ -129,12 +168,16 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
       return;
     }
 
+    // Corrige a duração do webm ANTES de tudo — mesmo buffer corrigido serve
+    // tanto pro Storage (player) quanto pro Whisper (transcrição).
+    const fixedBuffer = await remuxWebm(req.file.buffer);
+
     // Áudio e transcrição são passos independentes — um falhar não derruba o
     // outro. Sobe o áudio primeiro: mesmo se o Groq falhar, a chamada já fica
     // ouvível na tela.
     let audioUrl = null;
     try {
-      audioUrl = await uploadAudio(req.file.buffer, req.file.mimetype, recording.id);
+      audioUrl = await uploadAudio(fixedBuffer, req.file.mimetype, recording.id);
       await supabaseCall.from('uniko_call_recordings')
         .update({ audio_url: audioUrl }).eq('id', recording.id);
     } catch (e) {
@@ -142,7 +185,7 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     }
 
     try {
-      const text = await transcribe(req.file.buffer, req.file.mimetype);
+      const text = await transcribe(fixedBuffer, req.file.mimetype);
       const consentGiven = hasConsentNotice(text);
       if (consentGiven) {
         await supabaseCall.from('uniko_call_recordings')
