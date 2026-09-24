@@ -22,14 +22,23 @@ const UPLOAD_TOKEN = 'uniko-call-rec'; // mesmo token hardcoded do lado da exten
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const TRANSCRIBE_TIMEOUT_MS = 3 * 60 * 1000; // Groq nunca fica pendurado pra sempre — timeout vira erro claro
 
-// Aviso prévio de gravação (LGPD) — o servidor busca essa frase (config via
-// env, sem precisar redeploy) na transcrição do Whisper. Detecção por
-// PALAVRAS-CHAVE (não a frase exata inteira): o Whisper erra uma palavra vez
-// ou outra, e um falso-negativo aqui é DESTRUTIVO (apaga a gravação) — exigir
-// a maioria das palavras-âncora, em vez do trecho idêntico, é bem mais
-// tolerante a isso sem deixar de ser específico da frase real.
-const CONSENT_PHRASE = process.env.UNIKO_CALL_CONSENT_PHRASE || 'Por questões de segurança, esse atendimento está gravado';
-const CONSENT_MIN_MATCHES = 3; // de 4 palavras-âncora (ver normalize/anchorWords abaixo)
+// Aviso prévio de gravação (LGPD) — o servidor busca, na transcrição do
+// Whisper, a ideia de "Por questões de segurança, esse atendimento está
+// gravado". Um falso-negativo aqui é DESTRUTIVO (apaga a gravação), então a
+// detecção não pode depender de palavra exata — achado ao vivo 24/set/2026:
+// quem atende fala naturalmente diferente a cada vez ("essa LIGAÇÃO" em vez
+// de "esse atendimento", "graVADA" em vez de "graVADO"...) e a 1ª versão
+// (palavras-âncora fixas) rejeitava isso. Agora é por GRUPOS DE CONCEITO —
+// cada grupo é uma ideia da frase, com STEMS (raiz da palavra, sem
+// acabamento de gênero/conjugação) cobrindo os jeitos comuns de dizer;
+// conta como dito se pelo menos CONSENT_MIN_GROUPS dos grupos abaixo
+// aparecerem, cada um por QUALQUER uma das suas variações.
+const CONSENT_GROUPS = [
+  ['seguranc'],                                   // segurança/seguranças
+  ['grav'],                                       // grava/gravado/gravada/gravando/gravação
+  ['atendiment', 'ligac', 'chamad', 'conversa'],  // atendimento OU ligação OU chamada OU conversa
+];
+const CONSENT_MIN_GROUPS = 2; // de 3 grupos — ainda específico da frase real, mas tolerante à forma de falar
 
 const normalize = (s) => (s || '')
   .toLowerCase()
@@ -38,15 +47,10 @@ const normalize = (s) => (s || '')
   .replace(/\s+/g, ' ')
   .trim();
 
-const STOPWORDS = new Set(['por', 'de', 'esse', 'essa', 'esta', 'este', 'a', 'o', 'e', 'que']);
-const anchorWords = (phrase) => [...new Set(normalize(phrase).split(' ').filter(w => w.length > 2 && !STOPWORDS.has(w)))];
-
 function hasConsentNotice(transcript) {
-  const anchors = anchorWords(CONSENT_PHRASE);
-  if (!anchors.length) return false;
   const norm = normalize(transcript);
-  const hits = anchors.filter(w => norm.includes(w)).length;
-  return hits >= Math.min(CONSENT_MIN_MATCHES, anchors.length);
+  const hits = CONSENT_GROUPS.filter(group => group.some(stem => norm.includes(stem))).length;
+  return hits >= CONSENT_MIN_GROUPS;
 }
 
 let supabaseCall = null;
@@ -192,9 +196,10 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     try {
       console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe() (Groq)...`);
       const text = await transcribe(fixedBuffer, req.file.mimetype);
-      console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou, ${text.length} caracteres. Checando aviso prévio...`);
+      console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou (${text.length} caracteres): "${text.slice(0, 200)}"`);
       const consentGiven = hasConsentNotice(text);
-      console.log(`[uniko-call] recording id=${recording.id}: consentGiven=${consentGiven}. Atualizando registro...`);
+      const gruposBatidos = CONSENT_GROUPS.filter(g => g.some(stem => normalize(text).includes(stem))).map(g => g[0]);
+      console.log(`[uniko-call] recording id=${recording.id}: consentGiven=${consentGiven} (grupos batidos: ${gruposBatidos.join(', ') || 'nenhum'}). Atualizando registro...`);
       if (consentGiven) {
         const { error: updErr } = await supabaseCall.from('uniko_call_recordings')
           .update({ transcript: text, status: 'done', consent_given: true }).eq('id', recording.id);
