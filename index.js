@@ -3803,6 +3803,13 @@ require('./whatsappSafer')(app, { requireAdminOrModerador });
 require('./whatsappCloudApi')(app);
 
 // ═══════════════════════════════════════════════════════
+// UNIKO SECURITY — Backup criptografado (texto + mídia embutida), manual
+// (tudo ou 1 contato) ou automático mensal. Lógica isolada em
+// unikoSecurityBackup.js — ver esse arquivo pro detalhe.
+// ═══════════════════════════════════════════════════════
+require('./unikoSecurityBackup')(app, { requireAdmin });
+
+// ═══════════════════════════════════════════════════════
 // UNIKO CALL — recebe o áudio de chamada do WhatsApp Web gravado pela
 // extensão Cat-Bot, transcreve (Groq Whisper) e grava como "conversa".
 // Lógica isolada em uniko-call.js.
