@@ -20,6 +20,33 @@ const { createClient } = require('@supabase/supabase-js');
 const UPLOAD_TOKEN = 'uniko-call-rec'; // mesmo token hardcoded do lado da extensão (offscreen.js)
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 
+// Aviso prévio de gravação (LGPD) — o servidor busca essa frase (config via
+// env, sem precisar redeploy) na transcrição do Whisper. Detecção por
+// PALAVRAS-CHAVE (não a frase exata inteira): o Whisper erra uma palavra vez
+// ou outra, e um falso-negativo aqui é DESTRUTIVO (apaga a gravação) — exigir
+// a maioria das palavras-âncora, em vez do trecho idêntico, é bem mais
+// tolerante a isso sem deixar de ser específico da frase real.
+const CONSENT_PHRASE = process.env.UNIKO_CALL_CONSENT_PHRASE || 'Por questões de segurança, esse atendimento está gravado';
+const CONSENT_MIN_MATCHES = 3; // de 4 palavras-âncora (ver normalize/anchorWords abaixo)
+
+const normalize = (s) => (s || '')
+  .toLowerCase()
+  .normalize('NFD').replace(/[̀-ͯ]/g, '') // remove acentos
+  .replace(/[^a-z0-9\s]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const STOPWORDS = new Set(['por', 'de', 'esse', 'essa', 'esta', 'este', 'a', 'o', 'e', 'que']);
+const anchorWords = (phrase) => [...new Set(normalize(phrase).split(' ').filter(w => w.length > 2 && !STOPWORDS.has(w)))];
+
+function hasConsentNotice(transcript) {
+  const anchors = anchorWords(CONSENT_PHRASE);
+  if (!anchors.length) return false;
+  const norm = normalize(transcript);
+  const hits = anchors.filter(w => norm.includes(w)).length;
+  return hits >= Math.min(CONSENT_MIN_MATCHES, anchors.length);
+}
+
 let supabaseCall = null;
 if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABASE_SERVICE_KEY) {
   // Mesmo projeto Supabase do Uniko Security/Safer — reaproveita jwt_claims()
@@ -57,6 +84,11 @@ async function uploadAudio(buffer, mimetype, recordingId) {
   if (error) throw new Error(error.message);
   const { data } = supabaseCall.storage.from('uniko-call').getPublicUrl(path);
   return data.publicUrl;
+}
+
+async function deleteAudio(recordingId) {
+  try { await supabaseCall.storage.from('uniko-call').remove([`${recordingId}.webm`]); }
+  catch (e) { console.error('[uniko-call] falha ao apagar áudio sem consentimento:', e.message); }
 }
 
 async function upsertCallContact(name) {
@@ -111,8 +143,18 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
 
     try {
       const text = await transcribe(req.file.buffer, req.file.mimetype);
-      await supabaseCall.from('uniko_call_recordings')
-        .update({ transcript: text, status: 'done' }).eq('id', recording.id);
+      const consentGiven = hasConsentNotice(text);
+      if (consentGiven) {
+        await supabaseCall.from('uniko_call_recordings')
+          .update({ transcript: text, status: 'done', consent_given: true }).eq('id', recording.id);
+      } else {
+        // Aviso prévio NÃO dito — por segurança/proteção de dados, a gravação
+        // não é mantida: apaga o áudio já subido e não guarda a transcrição.
+        // Só sobra o registro (protocolo + horário) pra auditoria.
+        if (audioUrl) await deleteAudio(recording.id);
+        await supabaseCall.from('uniko_call_recordings')
+          .update({ transcript: null, audio_url: null, status: 'done', consent_given: false }).eq('id', recording.id);
+      }
       await supabaseCall.from('uniko_call_contacts')
         .update({ last_call_at: recording.started_at }).eq('id', contact.id);
     } catch (e) {
