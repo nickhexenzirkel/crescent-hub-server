@@ -35,32 +35,41 @@ const { createClient } = require('@supabase/supabase-js');
 const VERIFY_TOKEN = process.env.UNIKO_SECURITY_WEBHOOK_VERIFY_TOKEN || '';
 
 // Chave de API do Dualhook (BSP), gerada na aba "Outbound API key" do painel
-// da conexão — escopada a essa conexão, nunca a credencial real da Meta (o
-// Dualhook não divulga isso). Usada só pra baixar mídia (imagem/áudio) pelo
-// proxy deles da Graph API — a mesma versão (v25.0) e formato de endpoint
-// mostrados no painel pro envio de mensagens (`/v25.0/{phone_number_id}/messages`).
-const DUALHOOK_API_KEY   = process.env.UNIKO_SECURITY_DUALHOOK_API_KEY || '';
+// da conexão — escopada a essa conexão (um número só), nunca a credencial
+// real da Meta (o Dualhook não divulga isso). Usada só pra baixar mídia
+// (imagem/áudio) pelo proxy deles da Graph API — a mesma versão (v25.0) e
+// formato de endpoint mostrados no painel pro envio de mensagens
+// (`/v25.0/{phone_number_id}/messages`).
 const DUALHOOK_GRAPH_BASE = 'https://api.dualhook.com/v25.0';
+// Fallback pra quem não coloca a chave dentro do item do setor (compat com o
+// Faturamento, configurado antes de existir mais de um setor com mídia).
+const DUALHOOK_API_KEY_DEFAULT = process.env.UNIKO_SECURITY_DUALHOOK_API_KEY || '';
 
 // Cada SETOR (Faturamento, Financeiro, Suporte Técnico, Contratual, ...) é um
 // número de WhatsApp diferente, conectado via Coexistence numa conexão
-// própria do Dualhook — logo, um WABA_ID/phone_number_id próprio. O servidor
-// descobre o setor de cada webhook pelo `phone_number_id` que vem em
-// `value.metadata` (todo payload da Meta carrega isso). Formato do env var
-// (JSON, um item por setor já conectado):
-//   UNIKO_SECURITY_SECTORS=[{"category":"faturamento","waba_id":"4454634104777157","phone_number_id":"1274718269061611"}]
-// Pra adicionar um setor novo: conecta o número via Dualhook (mesmo passo a
-// passo do Faturamento) e acrescenta um item nesse array — não precisa mexer
-// em código.
+// própria do Dualhook — logo, um WABA_ID/phone_number_id (e uma "Outbound API
+// key" de mídia) próprios. O servidor descobre o setor de cada webhook pelo
+// `phone_number_id` que vem em `value.metadata` (todo payload da Meta carrega
+// isso). Formato do env var (JSON, um item por setor já conectado):
+//   UNIKO_SECURITY_SECTORS=[{"category":"faturamento","waba_id":"...","phone_number_id":"...","dualhook_key":"dh_live_..."}]
+// `dualhook_key` é OPCIONAL por item — se faltar, cai no
+// UNIKO_SECURITY_DUALHOOK_API_KEY (chave única, formato antigo). Pra
+// adicionar um setor novo: conecta o número via Dualhook (mesmo passo a passo
+// do Faturamento), gera a "Outbound API key" DESSA conexão, e acrescenta um
+// item nesse array — não precisa mexer em código.
 const SECTORS = (() => {
   try { return JSON.parse(process.env.UNIKO_SECURITY_SECTORS || '[]'); } catch { return []; }
 })();
 const WABA_IDS = new Set(SECTORS.map(s => s.waba_id).filter(Boolean));
 const CATEGORY_BY_PHONE_NUMBER_ID = new Map(SECTORS.map(s => [s.phone_number_id, s.category]));
+const DUALHOOK_KEY_BY_CATEGORY = new Map(SECTORS.map(s => [s.category, s.dualhook_key || '']));
 const DEFAULT_CATEGORY = 'faturamento'; // fallback pra payload sem phone_number_id reconhecido (não deveria acontecer)
 
 function categoryFor(phoneNumberId) {
   return CATEGORY_BY_PHONE_NUMBER_ID.get(phoneNumberId) || DEFAULT_CATEGORY;
+}
+function dualhookKeyFor(category) {
+  return DUALHOOK_KEY_BY_CATEGORY.get(category) || DUALHOOK_API_KEY_DEFAULT;
 }
 
 let supabaseSecurity = null;
@@ -72,8 +81,10 @@ if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABA
 } else {
   console.warn('[uniko-security] UNIKO_SECURITY_SUPABASE_URL/SERVICE_KEY não configurados — webhook vai receber, mas não vai gravar nada.');
 }
-if (!DUALHOOK_API_KEY) {
-  console.warn('[uniko-security] UNIKO_SECURITY_DUALHOOK_API_KEY não configurada — mensagens de imagem/áudio vão continuar só com o rótulo em texto.');
+for (const s of SECTORS) {
+  if (!dualhookKeyFor(s.category)) {
+    console.warn(`[uniko-security] setor "${s.category}" sem "dualhook_key" (nem UNIKO_SECURITY_DUALHOOK_API_KEY de fallback) — imagem/áudio desse setor vão continuar só com o rótulo em texto.`);
+  }
 }
 
 // Número foi conectado via Coexistence usando o Dualhook (BSP/Tech Provider —
@@ -129,17 +140,18 @@ function extractMessageContent(msg) {
 // diferente do esperado, mídia expirada) vira null e log, sem derrubar o
 // resto do processamento do webhook — a mensagem continua sendo gravada só
 // com o rótulo em texto, como já era antes.
-async function fetchAndStoreMedia(mediaId, msgType) {
-  if (!mediaId || !DUALHOOK_API_KEY || !supabaseSecurity) return null;
+async function fetchAndStoreMedia(mediaId, msgType, category) {
+  const dualhookKey = dualhookKeyFor(category);
+  if (!mediaId || !dualhookKey || !supabaseSecurity) return null;
   try {
     const metaRes = await fetch(`${DUALHOOK_GRAPH_BASE}/${mediaId}`, {
-      headers: { Authorization: `Bearer ${DUALHOOK_API_KEY}` },
+      headers: { Authorization: `Bearer ${dualhookKey}` },
     });
     if (!metaRes.ok) throw new Error(`metadata respondeu ${metaRes.status}: ${await metaRes.text()}`);
     const meta = await metaRes.json();
     if (!meta.url) throw new Error(`resposta sem "url": ${JSON.stringify(meta)}`);
 
-    const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${DUALHOOK_API_KEY}` } });
+    const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${dualhookKey}` } });
     if (!fileRes.ok) throw new Error(`download respondeu ${fileRes.status}`);
     const buffer = Buffer.from(await fileRes.arrayBuffer());
     const mime = meta.mime_type || fileRes.headers.get('content-type') || (msgType === 'audio' ? 'audio/ogg' : 'image/jpeg');
@@ -213,7 +225,7 @@ async function processChange(value) {
     if (!waId) continue;
     const contact = await upsertContact(waId, profileByWaId.get(waId), category);
     const { text, msgType, mediaId } = extractMessageContent(msg);
-    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType) : null;
+    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType, category) : null;
     await insertMessage({
       contact, waMessageId: msg.id, sentAt: new Date(Number(msg.timestamp) * 1000).toISOString(),
       direction: 'in', senderName: profileByWaId.get(waId), text, msgType,
@@ -228,7 +240,7 @@ async function processChange(value) {
     if (!waId) continue;
     const contact = await upsertContact(waId, profileByWaId.get(waId), category);
     const { text, msgType, mediaId } = extractMessageContent(echo);
-    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType) : null;
+    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType, category) : null;
     await insertMessage({
       contact, waMessageId: echo.id, sentAt: new Date(Number(echo.timestamp) * 1000).toISOString(),
       direction: 'out', senderName: null, text, msgType,
