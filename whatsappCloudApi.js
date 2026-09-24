@@ -34,6 +34,14 @@ const { createClient } = require('@supabase/supabase-js');
 
 const VERIFY_TOKEN = process.env.UNIKO_SECURITY_WEBHOOK_VERIFY_TOKEN || '';
 
+// Chave de API do Dualhook (BSP), gerada na aba "Outbound API key" do painel
+// da conexão — escopada a essa conexão, nunca a credencial real da Meta (o
+// Dualhook não divulga isso). Usada só pra baixar mídia (imagem/áudio) pelo
+// proxy deles da Graph API — a mesma versão (v25.0) e formato de endpoint
+// mostrados no painel pro envio de mensagens (`/v25.0/{phone_number_id}/messages`).
+const DUALHOOK_API_KEY   = process.env.UNIKO_SECURITY_DUALHOOK_API_KEY || '';
+const DUALHOOK_GRAPH_BASE = 'https://api.dualhook.com/v25.0';
+
 // Cada SETOR (Faturamento, Financeiro, Suporte Técnico, Contratual, ...) é um
 // número de WhatsApp diferente, conectado via Coexistence numa conexão
 // própria do Dualhook — logo, um WABA_ID/phone_number_id próprio. O servidor
@@ -64,6 +72,9 @@ if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABA
 } else {
   console.warn('[uniko-security] UNIKO_SECURITY_SUPABASE_URL/SERVICE_KEY não configurados — webhook vai receber, mas não vai gravar nada.');
 }
+if (!DUALHOOK_API_KEY) {
+  console.warn('[uniko-security] UNIKO_SECURITY_DUALHOOK_API_KEY não configurada — mensagens de imagem/áudio vão continuar só com o rótulo em texto.');
+}
 
 // Número foi conectado via Coexistence usando o Dualhook (BSP/Tech Provider —
 // nosso app "Uniko Security" sozinho não tem acesso a Coexistence, ver
@@ -86,14 +97,17 @@ function isValidPayload(body) {
 // Extrai um texto legível de qualquer tipo de mensagem que a Cloud API manda
 // — cobre os tipos mais comuns; o que não reconhece vira um rótulo genérico
 // (nunca perde a mensagem silenciosamente, só não sabe descrever o conteúdo
-// direito — mídia em si não é baixada nessa 1ª versão, só o metadado).
+// direito). Imagem/áudio carregam também `mediaId` — é o que dispara o
+// download de verdade em `processChange` (ver fetchAndStoreMedia); os demais
+// tipos (vídeo, documento, figurinha) continuam só com o rótulo, por ora
+// (pedido explícito do usuário: só imagem e áudio).
 function extractMessageContent(msg) {
   switch (msg.type) {
     case 'text':        return { text: msg.text?.body || '', msgType: 'text' };
-    case 'image':        return { text: msg.image?.caption || '[imagem]', msgType: 'image' };
+    case 'image':        return { text: msg.image?.caption || '[imagem]', msgType: 'image', mediaId: msg.image?.id || null };
+    case 'audio':        return { text: '[áudio]', msgType: 'audio', mediaId: msg.audio?.id || null };
     case 'video':        return { text: msg.video?.caption || '[vídeo]', msgType: 'video' };
     case 'document':     return { text: msg.document?.caption || msg.document?.filename || '[documento]', msgType: 'document' };
-    case 'audio':        return { text: '[áudio]', msgType: 'audio' };
     case 'sticker':      return { text: '[figurinha]', msgType: 'sticker' };
     case 'location':     return { text: `[localização: ${msg.location?.latitude ?? '?'}, ${msg.location?.longitude ?? '?'}]`, msgType: 'location' };
     case 'contacts':     return { text: '[contato compartilhado]', msgType: 'contacts' };
@@ -103,6 +117,43 @@ function extractMessageContent(msg) {
     case 'edit':         return { text: msg.edit?.message?.text?.body ? `(editada) ${msg.edit.message.text.body}` : '[mensagem editada]', msgType: 'edit' };
     case 'media_placeholder': return { text: '[mídia — sincronização do histórico não trouxe o conteúdo]', msgType: 'media_placeholder' };
     default:             return { text: `[mensagem: ${msg.type || 'desconhecida'}]`, msgType: msg.type || 'other' };
+  }
+}
+
+// Baixa uma mídia (imagem/áudio) pelo proxy da Graph API do Dualhook e sobe
+// pro Storage do Supabase — mesmo padrão do bucket do Uniko Call
+// (supabase_uniko_call_audio.sql), público, RLS aberta só nesse bucket.
+// Dois passos, igual a Graph API oficial: 1) GET /{media-id} devolve uma URL
+// de download temporária + mime_type; 2) GET nessa URL (mesmo Bearer) traz
+// os bytes. Best-effort: qualquer falha (token errado, formato de resposta
+// diferente do esperado, mídia expirada) vira null e log, sem derrubar o
+// resto do processamento do webhook — a mensagem continua sendo gravada só
+// com o rótulo em texto, como já era antes.
+async function fetchAndStoreMedia(mediaId, msgType) {
+  if (!mediaId || !DUALHOOK_API_KEY || !supabaseSecurity) return null;
+  try {
+    const metaRes = await fetch(`${DUALHOOK_GRAPH_BASE}/${mediaId}`, {
+      headers: { Authorization: `Bearer ${DUALHOOK_API_KEY}` },
+    });
+    if (!metaRes.ok) throw new Error(`metadata respondeu ${metaRes.status}: ${await metaRes.text()}`);
+    const meta = await metaRes.json();
+    if (!meta.url) throw new Error(`resposta sem "url": ${JSON.stringify(meta)}`);
+
+    const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${DUALHOOK_API_KEY}` } });
+    if (!fileRes.ok) throw new Error(`download respondeu ${fileRes.status}`);
+    const buffer = Buffer.from(await fileRes.arrayBuffer());
+    const mime = meta.mime_type || fileRes.headers.get('content-type') || (msgType === 'audio' ? 'audio/ogg' : 'image/jpeg');
+    const ext = (mime.split('/')[1] || 'bin').split(';')[0];
+    const path = `${mediaId}.${ext}`;
+
+    const { error } = await supabaseSecurity.storage.from('uniko-security-media')
+      .upload(path, buffer, { contentType: mime, upsert: true });
+    if (error) throw new Error(error.message);
+    const { data } = supabaseSecurity.storage.from('uniko-security-media').getPublicUrl(path);
+    return { url: data.publicUrl, mime };
+  } catch (e) {
+    console.error(`[uniko-security] falha ao baixar mídia (${msgType}, id=${mediaId}):`, e.message);
+    return null;
   }
 }
 
@@ -137,11 +188,12 @@ async function upsertContact(waId, profileName, category) {
 // de verdade sempre SOBRESCREVE um "unsupported" antigo (upsert normal);
 // "unsupported" NUNCA sobrescreve conteúdo bom que já esteja gravado
 // (ignoreDuplicates), só preenche se ainda não existir nada pra esse id.
-async function insertMessage({ contact, waMessageId, sentAt, direction, senderName, text, msgType }) {
+async function insertMessage({ contact, waMessageId, sentAt, direction, senderName, text, msgType, mediaUrl, mediaMime }) {
   const { error } = await supabaseSecurity.from('uniko_security_messages')
     .upsert({
       contact_id: contact.id, wa_message_id: waMessageId || null, sent_at: sentAt,
       direction, sender_name: senderName || null, text, msg_type: msgType,
+      media_url: mediaUrl || null, media_mime: mediaMime || null,
     }, { onConflict: 'wa_message_id', ignoreDuplicates: msgType === 'unsupported' });
   if (error) throw new Error(error.message);
   if (!contact.last_message_at || sentAt > contact.last_message_at) {
@@ -160,10 +212,12 @@ async function processChange(value) {
     const waId = msg.from;
     if (!waId) continue;
     const contact = await upsertContact(waId, profileByWaId.get(waId), category);
-    const { text, msgType } = extractMessageContent(msg);
+    const { text, msgType, mediaId } = extractMessageContent(msg);
+    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType) : null;
     await insertMessage({
       contact, waMessageId: msg.id, sentAt: new Date(Number(msg.timestamp) * 1000).toISOString(),
       direction: 'in', senderName: profileByWaId.get(waId), text, msgType,
+      mediaUrl: media?.url, mediaMime: media?.mime,
     });
   }
 
@@ -173,10 +227,12 @@ async function processChange(value) {
     const waId = echo.to || echo.from;
     if (!waId) continue;
     const contact = await upsertContact(waId, profileByWaId.get(waId), category);
-    const { text, msgType } = extractMessageContent(echo);
+    const { text, msgType, mediaId } = extractMessageContent(echo);
+    const media = mediaId ? await fetchAndStoreMedia(mediaId, msgType) : null;
     await insertMessage({
       contact, waMessageId: echo.id, sentAt: new Date(Number(echo.timestamp) * 1000).toISOString(),
       direction: 'out', senderName: null, text, msgType,
+      mediaUrl: media?.url, mediaMime: media?.mime,
     });
   }
 }
