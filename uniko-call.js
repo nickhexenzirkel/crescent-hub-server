@@ -168,42 +168,55 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
       return;
     }
 
+    console.log(`[uniko-call] recording id=${recording.id}: iniciando remux (buffer original ${req.file.buffer.length} bytes)...`);
     // Corrige a duração do webm ANTES de tudo — mesmo buffer corrigido serve
     // tanto pro Storage (player) quanto pro Whisper (transcrição).
     const fixedBuffer = await remuxWebm(req.file.buffer);
+    console.log(`[uniko-call] recording id=${recording.id}: remux concluído (buffer final ${fixedBuffer.length} bytes).`);
 
     // Áudio e transcrição são passos independentes — um falhar não derruba o
     // outro. Sobe o áudio primeiro: mesmo se o Groq falhar, a chamada já fica
     // ouvível na tela.
     let audioUrl = null;
     try {
+      console.log(`[uniko-call] recording id=${recording.id}: subindo áudio pro Storage...`);
       audioUrl = await uploadAudio(fixedBuffer, req.file.mimetype, recording.id);
-      await supabaseCall.from('uniko_call_recordings')
+      console.log(`[uniko-call] recording id=${recording.id}: áudio no Storage OK:`, audioUrl);
+      const { error: audioUpdErr } = await supabaseCall.from('uniko_call_recordings')
         .update({ audio_url: audioUrl }).eq('id', recording.id);
+      if (audioUpdErr) console.error(`[uniko-call] recording id=${recording.id}: update audio_url falhou:`, audioUpdErr.message);
     } catch (e) {
-      console.error('[uniko-call] falha ao subir o áudio:', e.message);
+      console.error(`[uniko-call] recording id=${recording.id}: falha ao subir o áudio:`, e.message);
     }
 
     try {
+      console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe() (Groq)...`);
       const text = await transcribe(fixedBuffer, req.file.mimetype);
+      console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou, ${text.length} caracteres. Checando aviso prévio...`);
       const consentGiven = hasConsentNotice(text);
+      console.log(`[uniko-call] recording id=${recording.id}: consentGiven=${consentGiven}. Atualizando registro...`);
       if (consentGiven) {
-        await supabaseCall.from('uniko_call_recordings')
+        const { error: updErr } = await supabaseCall.from('uniko_call_recordings')
           .update({ transcript: text, status: 'done', consent_given: true }).eq('id', recording.id);
+        if (updErr) console.error(`[uniko-call] recording id=${recording.id}: update (consentido) falhou:`, updErr.message);
+        else console.log(`[uniko-call] recording id=${recording.id}: gravado como "done" com transcrição.`);
       } else {
         // Aviso prévio NÃO dito — por segurança/proteção de dados, a gravação
         // não é mantida: apaga o áudio já subido e não guarda a transcrição.
         // Só sobra o registro (protocolo + horário) pra auditoria.
         if (audioUrl) await deleteAudio(recording.id);
-        await supabaseCall.from('uniko_call_recordings')
+        const { error: updErr } = await supabaseCall.from('uniko_call_recordings')
           .update({ transcript: null, audio_url: null, status: 'done', consent_given: false }).eq('id', recording.id);
+        if (updErr) console.error(`[uniko-call] recording id=${recording.id}: update (sem consentimento) falhou:`, updErr.message);
+        else console.log(`[uniko-call] recording id=${recording.id}: gravado como "done" sem consentimento (áudio apagado).`);
       }
       await supabaseCall.from('uniko_call_contacts')
         .update({ last_call_at: recording.started_at }).eq('id', contact.id);
     } catch (e) {
-      console.error('[uniko-call] falha na transcrição:', e.message);
-      await supabaseCall.from('uniko_call_recordings')
+      console.error(`[uniko-call] recording id=${recording.id}: falha na transcrição:`, e.message);
+      const { error: errUpdErr } = await supabaseCall.from('uniko_call_recordings')
         .update({ status: 'error', error: e.message }).eq('id', recording.id);
+      if (errUpdErr) console.error(`[uniko-call] recording id=${recording.id}: até o update de status="error" falhou:`, errUpdErr.message);
     }
   });
 };
