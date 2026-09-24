@@ -140,18 +140,49 @@ function extractMessageContent(msg) {
 // diferente do esperado, mídia expirada) vira null e log, sem derrubar o
 // resto do processamento do webhook — a mensagem continua sendo gravada só
 // com o rótulo em texto, como já era antes.
+// Fila global (todos os setores compartilham a mesma cota do Dualhook) — nunca
+// deixa duas chamadas saírem mais rápido que DUALHOOK_MIN_GAP_MS uma da outra.
+// Achado ao vivo (conexão do Financeiro): um histórico grande sincronizando de
+// uma vez disparava dezenas de downloads de mídia juntos e estourava o rate
+// limit deles ("429 Rate limit exceeded") — sem fila, cada falha era
+// definitiva (a mensagem já ficava salva sem mídia pra sempre).
+const DUALHOOK_MIN_GAP_MS = 350;
+let _dualhookQueueTail = Promise.resolve();
+function withDualhookThrottle(fn) {
+  const run = _dualhookQueueTail.then(fn);
+  // a fila segue mesmo se essa chamada falhar — senão uma falha travaria
+  // todo mundo atrás dela na fila pra sempre.
+  _dualhookQueueTail = run.catch(() => {}).then(() => new Promise((r) => setTimeout(r, DUALHOOK_MIN_GAP_MS)));
+  return run;
+}
+
+// Além da fila (que evita a maioria dos 429), repete com espera quando MESMO
+// ASSIM leva um 429 — respeita o header Retry-After se o Dualhook mandar, ou
+// backoff crescente (2s, 4s, 6s, 8s) senão. Até 4 tentativas antes de desistir.
+async function dualhookFetch(url, opts, attempt = 1) {
+  const res = await withDualhookThrottle(() => fetch(url, opts));
+  if (res.status === 429 && attempt <= 4) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : attempt * 2000;
+    console.warn(`[uniko-security] Dualhook 429 — esperando ${waitMs}ms e tentando de novo (${attempt}/4)`);
+    await new Promise((r) => setTimeout(r, waitMs));
+    return dualhookFetch(url, opts, attempt + 1);
+  }
+  return res;
+}
+
 async function fetchAndStoreMedia(mediaId, msgType, category) {
   const dualhookKey = dualhookKeyFor(category);
   if (!mediaId || !dualhookKey || !supabaseSecurity) return null;
   try {
-    const metaRes = await fetch(`${DUALHOOK_GRAPH_BASE}/${mediaId}`, {
+    const metaRes = await dualhookFetch(`${DUALHOOK_GRAPH_BASE}/${mediaId}`, {
       headers: { Authorization: `Bearer ${dualhookKey}` },
     });
     if (!metaRes.ok) throw new Error(`metadata respondeu ${metaRes.status}: ${await metaRes.text()}`);
     const meta = await metaRes.json();
     if (!meta.url) throw new Error(`resposta sem "url": ${JSON.stringify(meta)}`);
 
-    const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${dualhookKey}` } });
+    const fileRes = await dualhookFetch(meta.url, { headers: { Authorization: `Bearer ${dualhookKey}` } });
     if (!fileRes.ok) throw new Error(`download respondeu ${fileRes.status}`);
     const buffer = Buffer.from(await fileRes.arrayBuffer());
     const mime = meta.mime_type || fileRes.headers.get('content-type') || (msgType === 'audio' ? 'audio/ogg' : 'image/jpeg');
