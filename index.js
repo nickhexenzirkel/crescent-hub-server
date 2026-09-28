@@ -3058,7 +3058,7 @@ async function maquinaAutoplayTracks() {
 
 // ═══════════════════════════════════════════════════════
 // AUTOPLAY GUIADO PELA BIBLIOTECA DE PLAYLISTS
-// 2ª opção do autoplay (depois da Máquina do Tempo): em vez de cair pra
+// 1ª opção do autoplay (a Máquina do Tempo é só a reserva): em vez de cair pra
 // recomendação genérica do Spotify (top tracks do usuário, recently-played,
 // playlists em destaque — nada disso tem a ver com o gosto do escritório),
 // sorteia LIBRARY_PER_PLAYLIST faixas de CADA playlist salva na aba
@@ -3188,21 +3188,23 @@ async function startAutoPlaylist() {
   try {
     let tracks = [];
 
-    // 1ª opção: o que o escritório mais ouve (Máquina do Tempo)
+    // 1ª opção: a Biblioteca de Playlists (aba "Playlist" da Central Alexa) — 2 faixas
+    // de cada playlist salva. É o que o pessoal curou de propósito pra tocar ali; a
+    // Máquina do Tempo passou a ser só a reserva (pedido do usuário: o autoplay estava
+    // tocando SÓ as mais tocadas dela e nada das playlists).
     try {
-      tracks = (await maquinaAutoplayTracks()).slice(0, 20);
+      tracks = (await libraryAutoplayTracks()).slice(0, 20);
     } catch (err) {
-      console.warn('⚠️  Autoplay/Máquina do Tempo indisponível:', err.response?.data?.error?.message || err.message);
+      console.warn('⚠️  Autoplay/Biblioteca de playlists indisponível:', err.response?.data?.error?.message || err.message);
     }
 
-    // 2ª opção: a Biblioteca de Playlists (aba "Playlist" da Central Alexa) —
-    // 2 faixas de cada playlist salva, em vez de recomendação genérica do
-    // Spotify (que não tem nada a ver com o gosto do escritório).
+    // 2ª opção: o que o escritório mais ouve (Máquina do Tempo) — só se a Biblioteca
+    // estiver vazia/indisponível (nenhuma playlist salva, embed fora do ar etc.).
     if (tracks.length === 0) {
       try {
-        tracks = (await libraryAutoplayTracks()).slice(0, 20);
+        tracks = (await maquinaAutoplayTracks()).slice(0, 20);
       } catch (err) {
-        console.warn('⚠️  Autoplay/Biblioteca de playlists indisponível:', err.response?.data?.error?.message || err.message);
+        console.warn('⚠️  Autoplay/Máquina do Tempo indisponível:', err.response?.data?.error?.message || err.message);
       }
     }
 
