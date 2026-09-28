@@ -1929,7 +1929,9 @@ app.post('/api/queue', async (req, res) => {
       if (playingAutoplay) {
         await supabase.from('queue').update({ status: 'played' }).eq('id', playingAutoplay.id);
       }
-      await startPlaying(data);
+      if ((await tryStartSong(data)) === 'unplayable') {
+        return res.status(422).json({ error: `"${title}" não está disponível pra tocar (restrição de região ou direitos no Spotify). Escolha outra versão.` });
+      }
       console.log(`▶️  Auto-start: "${title}" — ${playingAutoplay ? 'interrompeu autoplay' : 'fila estava vazia'}`);
     } else if (_trackChangeInProgress) {
       // Uma troca de faixa legítima está rolando NESSE EXATO INSTANTE (advanceQueue/
@@ -1983,7 +1985,7 @@ app.post('/api/player/play', requireAdminOrDJ, async (req, res) => {
   try {
     const next = await getNextSong();
     if (!next) return res.status(404).json({ error: 'Fila vazia' });
-    await startPlaying(next);
+    if (!(await startFirstPlayable(next))) return res.status(422).json({ error: 'Nenhuma faixa da fila está disponível pra tocar agora.' });
     res.json({ ok: true, song: next });
   } catch (err) {
     console.error('❌ Play:', err.response?.data || err.message);
@@ -2356,6 +2358,9 @@ async function fetchEmbedPlaylist(playlistId) {
       title: t.title, artist: t.subtitle,
       album_art: image, duration_ms: t.duration || 0,
       duration_str: fmtMsTrack(t.duration || 0),
+      // O embed avisa quando a faixa NÃO toca (indisponível na região, removida, sem
+      // direitos). Extra pro autoplay não escolher faixa que travaria a fila.
+      isPlayable: t.isPlayable !== false, explicit: !!t.isExplicit,
     }));
 
   return { name: entity.name, image, owner: entity.subtitle || null, tracks };
@@ -2663,6 +2668,52 @@ async function startPlaying(song) {
   } finally {
     _trackChangeInProgress = false;
   }
+}
+
+// O erro do Spotify é culpa DA FAIXA (indisponível na região, removida, restrição de
+// direitos) e não do dispositivo/conta/rede? Só nesse caso vale descartar a faixa e
+// tentar a próxima — com o Echo offline, sem Premium ou com limite de requisições,
+// pular faixas só esvaziaria a fila à toa.
+function isUnplayableTrackError(err) {
+  const st = err?.response?.status;
+  if (!st || st === 401 || st === 429 || st >= 500) return false;
+  const e = err.response?.data?.error;
+  const reason = String(e?.reason || '');
+  const msg = String(e?.message || '').toLowerCase();
+  if (reason === 'NO_ACTIVE_DEVICE' || reason === 'PREMIUM_REQUIRED') return false;
+  if (/device|premium|rate limit|token/.test(msg)) return false;
+  return st === 400 || st === 403 || st === 404;
+}
+
+// Toca a faixa; se ELA for o problema, marca como removida (não fica presa no topo da
+// fila) e devolve 'unplayable' pra quem chamou passar pra próxima. Sem isso, faixa
+// indisponível lançava erro dentro de advanceQueue/startAutoPlaylist, ficava 'pending'
+// e o monitor nunca mais avançava (ele só avança quando ALGO estava tocando) — a fila
+// travava em silêncio até alguém clicar em pular. Erro de dispositivo/rede continua
+// propagando como antes. 'ok' = tocando (ou sem dispositivo: startPlaying devolve a
+// faixa pra pending sozinho).
+async function tryStartSong(song) {
+  try {
+    await startPlaying(song);
+    return 'ok';
+  } catch (err) {
+    if (!isUnplayableTrackError(err)) throw err;
+    const why = err.response?.data?.error?.message || err.message;
+    console.warn(`⏭  Faixa não toca — descartada: "${song.title}" (${song.spotify_id || 's/ id'}) — ${err.response?.status} ${why}`);
+    await supabase.from('queue').update({ status: 'removed' }).eq('id', song.id);
+    return 'unplayable';
+  }
+}
+
+// Tenta tocar `first`; se não tocar, pega a próxima pendente, até `max` vezes.
+// Devolve true se algo começou a tocar.
+async function startFirstPlayable(first, max = 6) {
+  let cand = first;
+  for (let i = 0; i < max && cand; i++) {
+    if ((await tryStartSong(cand)) === 'ok') return true;
+    cand = await getNextSong();
+  }
+  return false;
 }
 
 async function _startPlayingInner(song) {
@@ -3036,10 +3087,19 @@ async function recentQueueIds(limit = MAQUINA_RECENT_SKIP) {
 // a view da Máquina do Tempo nem o embed da playlist guardam sozinhos.
 async function fetchTracksByIds(ids) {
   const raw = [];
-  for (let i = 0; i < ids.length; i += 50) {
-    const chunk = ids.slice(i, i + 50).join(',');
-    const r = await spotify('get', `/tracks?ids=${chunk}&market=BR`);
-    raw.push(...(r.data?.tracks || []).filter(Boolean));
+  // Só IDs de faixa válidos (22 caracteres): um "id" torto (arquivo local, lixo do embed)
+  // faz o Spotify recusar o LOTE INTEIRO com 400 e o autoplay ficava sem nada.
+  const valid = [...new Set((ids || []).filter(id => /^[A-Za-z0-9]{22}$/.test(id || '')))];
+  for (let i = 0; i < valid.length; i += 50) {
+    const chunk = valid.slice(i, i + 50).join(',');
+    try {
+      const r = await spotify('get', `/tracks?ids=${chunk}&market=BR`);
+      // Com `market`, o Spotify devolve is_playable=false pra faixa que não toca no Brasil.
+      // Tocar uma dessas dá erro de restrição e travava a fila — nem entra no pool.
+      raw.push(...(r.data?.tracks || []).filter(t => t && t.is_playable !== false));
+    } catch (err) {
+      console.warn(`⚠️  fetchTracksByIds: lote falhou (${err.response?.status || err.message}) — seguindo com o resto`);
+    }
   }
   return raw;
 }
@@ -3065,10 +3125,16 @@ async function libraryAutoplayTracks() {
     catch (err) { failed++; console.warn(`⚠️  Autoplay/Biblioteca: falhou buscar "${pl.name}" (${pl.spotify_id}) — ${err.response?.status ? `HTTP ${err.response.status}` : err.message}`); continue; }
     if (!embed?.tracks?.length) { failed++; console.warn(`⚠️  Autoplay/Biblioteca: "${pl.name}" (${pl.spotify_id}) voltou sem faixas (playlist vazia, privada ou removida?).`); continue; }
 
-    const fresh = embed.tracks.filter(t => t.id && !recentIds.has(t.id));
+    // Só faixa que toca (isPlayable) e sem flag de explícito: antes o sorteio de 2 faixas
+    // acontecia ANTES desses filtros, então playlist com muita faixa explícita/indisponível
+    // "perdia" a vaga da rodada (as 2 sorteadas eram barradas depois) e parecia que o
+    // autoplay ignorava aquela playlist.
+    const usable = embed.tracks.filter(t => t.id && t.isPlayable !== false && !t.explicit);
+    if (!usable.length) { failed++; console.warn(`⚠️  Autoplay/Biblioteca: "${pl.name}" (${pl.spotify_id}) sem faixa aproveitável (${embed.tracks.length} faixa(s): indisponíveis ou explícitas).`); continue; }
+    const fresh = usable.filter(t => !recentIds.has(t.id));
     // Playlist pequena e já toda tocada recentemente: melhor repetir dela do
     // que descartar a playlist inteira da rodada.
-    const from = fresh.length ? fresh : embed.tracks;
+    const from = fresh.length ? fresh : usable;
     const chosen = from.sort(() => Math.random() - 0.5).slice(0, LIBRARY_PER_PLAYLIST);
     if (chosen.length) {
       pickedIds.push(...chosen.map(t => t.id));
@@ -3169,17 +3235,20 @@ async function startAutoPlaylist() {
 
     const { data: inserted } = await supabase.from('queue').insert(rows).select();
 
-    // Toca a primeira imediatamente
+    // Toca a primeira imediatamente — se ela não tocar (indisponível etc.), tenta as
+    // outras da rodada em vez de deixar tudo 'pending' e a fila parada.
     if (inserted?.[0]) {
-      await startPlaying(inserted[0]);
-      console.log(`🎲 Autoplay: ${inserted.length} recomendações adicionadas — tocando "${inserted[0].title}"`);
+      const ok = await startFirstPlayable(inserted[0]);
+      console.log(ok
+        ? `🎲 Autoplay: ${inserted.length} recomendações adicionadas — fila tocando`
+        : `⚠️  Autoplay: ${inserted.length} recomendações adicionadas, mas nenhuma conseguiu tocar (ver avisos acima)`);
     }
   } catch (err) {
     console.error('⚠️  Auto-playlist falhou:', err.response?.data?.error?.message || err.message);
   }
 }
 
-async function advanceQueue(reason = 'auto') {
+async function advanceQueue(reason = 'auto', _depth = 0) {
   // Pega o que estava tocando
   const { data: state } = await supabase
     .from('player_state').select('current_song_id').eq('id', 1).single();
@@ -3236,7 +3305,11 @@ async function advanceQueue(reason = 'auto') {
     return;
   }
 
-  await startPlaying(next);
+  // Faixa que não toca é descartada e a próxima assume; se a fila acabar de tanto
+  // descartar, cai no autoplay como qualquer fila vazia.
+  if (!(await startFirstPlayable(next))) {
+    if (_depth < 2 && !(await getNextSong())) return advanceQueue('skip_unplayable', _depth + 1);
+  }
 }
 
 // ═══════════════════════════════════════════════════════
