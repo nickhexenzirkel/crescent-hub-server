@@ -3098,7 +3098,22 @@ async function fetchTracksByIds(ids) {
       // Tocar uma dessas dá erro de restrição e travava a fila — nem entra no pool.
       raw.push(...(r.data?.tracks || []).filter(t => t && t.is_playable !== false));
     } catch (err) {
-      console.warn(`⚠️  fetchTracksByIds: lote falhou (${err.response?.status || err.message}) — seguindo com o resto`);
+      const st = err.response?.status;
+      console.warn(`⚠️  fetchTracksByIds: lote falhou (${st || err.message}) — ${st === 403 ? 'tentando faixa por faixa' : 'seguindo com o resto'}`);
+      // 403 no endpoint em LOTE (restrição do app Spotify em Development Mode): o de faixa
+      // única às vezes ainda responde. Tenta uma a uma, mas desiste na 1ª recusa pra não
+      // gastar a cota (apertada) à toa se o app inteiro estiver bloqueado.
+      if (st === 403) {
+        for (const id of chunk.split(',')) {
+          try {
+            const one = await spotify('get', `/tracks/${id}?market=BR`);
+            if (one.data && one.data.is_playable !== false) raw.push(one.data);
+          } catch (e2) {
+            console.warn(`⚠️  fetchTracksByIds: faixa a faixa também recusada (${e2.response?.status || e2.message}) — desistindo do lote`);
+            break;
+          }
+        }
+      }
     }
   }
   return raw;
@@ -3112,11 +3127,11 @@ async function libraryAutoplayTracks() {
   const recentIds = await recentQueueIds();
   const shuffled  = playlists.sort(() => Math.random() - 0.5);
 
-  const pickedIds  = [];
+  const pickedTracks = [];   // faixas do EMBED (já têm uri/título/artista/duração/explícito)
   const usedNames  = [];
   let failed = 0;
   for (const pl of shuffled) {
-    if (pickedIds.length >= LIBRARY_POOL_TARGET || usedNames.length >= LIBRARY_MAX_PLAYLISTS) break;
+    if (pickedTracks.length >= LIBRARY_POOL_TARGET || usedNames.length >= LIBRARY_MAX_PLAYLISTS) break;
     let embed;
     // Sem log aqui a falha ficava invisível: se TODAS as playlists falharem
     // (embed do Spotify bloqueando a VPS, link apodrecido, etc.) o autoplay
@@ -3137,21 +3152,30 @@ async function libraryAutoplayTracks() {
     const from = fresh.length ? fresh : usable;
     const chosen = from.sort(() => Math.random() - 0.5).slice(0, LIBRARY_PER_PLAYLIST);
     if (chosen.length) {
-      pickedIds.push(...chosen.map(t => t.id));
+      pickedTracks.push(...chosen);
       usedNames.push(pl.name);
     }
   }
-  if (pickedIds.length === 0) {
+  if (pickedTracks.length === 0) {
     console.log(`🎵 Autoplay/Biblioteca: nenhuma faixa aproveitável (${playlists.length} playlist(s) na biblioteca, ${failed} falharam ao buscar).`);
     return [];
   }
 
-  const raw = await fetchTracksByIds(pickedIds);
+  // NÃO busca as faixas na API do Spotify (/tracks?ids=): ela devolve 403 pro app (visto
+  // no log real: "lote falhou (403)") e o autoplay ficava sem nada, com a mensagem
+  // enganosa de "barradas pelo filtro". O embed já traz tudo que a fila precisa; monta
+  // objetos no mesmo formato que o resto do fluxo (filtro de conteúdo + inserção) espera.
+  const raw = pickedTracks.map(t => ({
+    id: t.id, uri: t.uri, name: t.title,
+    artists: String(t.artist || '').split(/,\s*/).filter(Boolean).map(name => ({ name })),
+    album: { name: '', images: t.album_art ? [{ url: t.album_art }] : [] },
+    duration_ms: t.duration_ms, explicit: !!t.explicit,
+  }));
   const tracks = await filterAutoplayTracks(raw);
   if (tracks.length) {
     console.log(`🎵 Autoplay: pool da Biblioteca de Playlists — ${usedNames.length} playlist(s) (${usedNames.slice(0, 4).join(', ')}${usedNames.length > 4 ? '…' : ''})`);
   } else {
-    console.log('🎵 Autoplay/Biblioteca: faixas encontradas mas todas barradas pelo filtro de conteúdo.');
+    console.log(`🎵 Autoplay/Biblioteca: ${pickedTracks.length} faixa(s) sorteada(s), todas barradas pelo filtro de conteúdo (palavrão/funk).`);
   }
   return tracks;
 }
