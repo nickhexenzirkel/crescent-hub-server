@@ -23,23 +23,38 @@ const os     = require('os');
 const fs     = require('fs');
 const crypto = require('crypto');
 
-const WA_PROFILE_DIR = path.join(os.homedir(), '.uniko-safer-wa-profile');
+// Um número de WhatsApp = uma "conta" = um navegador persistente com perfil
+// próprio (cada um logado por QR Code uma vez). 'principal' mantém a pasta
+// antiga (Faturamento/Financeiro) pra não pedir novo QR Code.
+const WA_CONTAS = {
+  principal:  path.join(os.homedir(), '.uniko-safer-wa-profile'),
+  suporte:    path.join(os.homedir(), '.uniko-safer-wa-profile-suporte'),
+  contratual: path.join(os.homedir(), '.uniko-safer-wa-profile-contratual'),
+};
+const DEFAULT_CONTA = 'principal';
+const contaOf = (req) => {
+  const c = String(req.query?.conta || req.body?.conta || DEFAULT_CONTA);
+  return Object.prototype.hasOwnProperty.call(WA_CONTAS, c) ? c : null;
+};
 const WA_JOB_TTL_MS   = 30 * 60 * 1000; // 30min depois de terminar, descarta os buffers
 
-let waContext = null;
-let waPage    = null;
+const waSessions = new Map(); // conta → { context, page }
 const waJobs  = new Map(); // jobId → { status, logs, files, total, stopRequested, message }
 
 // Estado da sincronização automática periódica — "quem tinha essa aparência
 // da barra lateral na última vez que checamos". Só em memória (reseta se o
 // processo reiniciar); no pior caso, a primeira rodada depois de um restart
 // trata todo mundo como "mudou" e resincroniza geral uma vez, sem problema.
-const lastActivitySnapshot = new Map(); // nome → texto completo da linha
+const lastActivitySnapshots = new Map(); // conta → Map(nome → texto completo da linha)
+const snapshotOf = (conta) => {
+  if (!lastActivitySnapshots.has(conta)) lastActivitySnapshots.set(conta, new Map());
+  return lastActivitySnapshots.get(conta);
+};
 
 /* ── Sessão persistente ──────────────────────────────────── */
 
-async function launchWa() {
-  waContext = await chromium.launchPersistentContext(WA_PROFILE_DIR, {
+async function launchWa(conta) {
+  const context = await chromium.launchPersistentContext(WA_CONTAS[conta], {
     headless: true,
     acceptDownloads: true,
     // Sem isso, o Playwright usa um viewport pequeno (1280x720) por padrão
@@ -50,41 +65,41 @@ async function launchWa() {
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
   });
-  waPage = waContext.pages()[0] || await waContext.newPage();
+  const page = context.pages()[0] || await context.newPage();
   // Esconde navigator.webdriver — mesma técnica já usada no Playwright do yt-dlp
   // (index.js) pra reduzir a chance de detecção de automação.
-  await waPage.addInitScript(() => {
+  await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
-  await waPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
+  await page.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
+  waSessions.set(conta, { context, page });
 }
 
-async function getWaPage() {
+async function getWaPage(conta = DEFAULT_CONTA) {
   try {
-    if (!waContext) await launchWa();
-    if (!waPage || waPage.isClosed()) {
-      waPage = waContext.pages()[0] || await waContext.newPage();
-      await waPage.addInitScript(() => {
+    if (!waSessions.has(conta)) await launchWa(conta);
+    const sess = waSessions.get(conta);
+    if (!sess.page || sess.page.isClosed()) {
+      sess.page = sess.context.pages()[0] || await sess.context.newPage();
+      await sess.page.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       });
     }
-    if (!waPage.url().includes('web.whatsapp.com')) {
-      await waPage.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
+    if (!sess.page.url().includes('web.whatsapp.com')) {
+      await sess.page.goto('https://web.whatsapp.com', { waitUntil: 'domcontentloaded' });
     }
     // Confere que o navegador está vivo de verdade — se alguém matar o
-    // processo do Chromium por fora (ex: `pkill`), `waContext`/`waPage`
-    // continuam existindo como OBJETOS na memória do Node, mas qualquer
-    // ação neles passa a falhar. `.isClosed()` não pega esse caso (o
-    // processo morreu, o objeto Playwright não sabe disso ainda).
-    await waPage.evaluate(() => true);
-    return waPage;
+    // processo do Chromium por fora (ex: `pkill`), context/page continuam
+    // existindo como OBJETOS na memória do Node, mas qualquer ação neles
+    // passa a falhar. `.isClosed()` não pega esse caso.
+    await sess.page.evaluate(() => true);
+    return sess.page;
   } catch (err) {
-    console.error('[uniko-safer-wa] sessão do WhatsApp Web morta, relançando:', err.message);
-    try { await waContext?.close(); } catch {}
-    waContext = null;
-    waPage = null;
-    await launchWa();
-    return waPage;
+    console.error(`[uniko-safer-wa:${conta}] sessão do WhatsApp Web morta, relançando:`, err.message);
+    try { await waSessions.get(conta)?.context.close(); } catch {}
+    waSessions.delete(conta);
+    await launchWa(conta);
+    return waSessions.get(conta).page;
   }
 }
 
@@ -105,8 +120,8 @@ const waitVisible = (locator, timeout) =>
 // esse atributo mude numa atualização futura do WhatsApp Web.
 const searchBoxLocator = (page) => page.locator('[data-tab="3"], [aria-label*="esquisar" i]').first();
 
-async function getWaStatus() {
-  const page = await getWaPage();
+async function getWaStatus(conta = DEFAULT_CONTA) {
+  const page = await getWaPage(conta);
   await page.waitForLoadState('domcontentloaded').catch(() => {});
 
   // Login primeiro (dois sinais independentes — caixa de busca OU item da
@@ -421,12 +436,13 @@ async function processContact(page, job, log, name) {
 // em vez de uma só perfeita.
 const MAX_PASSES = 3;
 
-async function runWhatsappImport(jobId, pauseSeconds, onlyChanged = false) {
+async function runWhatsappImport(jobId, conta, pauseSeconds, onlyChanged = false) {
   const job = waJobs.get(jobId);
   const log = (entry) => job.logs.push(entry);
 
   try {
-    const page = await getWaPage();
+    const page = await getWaPage(conta);
+    const lastActivitySnapshot = snapshotOf(conta);
     // Recarrega no início de CADA rodada MANUAL. A página fica aberta o
     // tempo todo entre uma rodada e outra (pra manter a sessão logada) — se
     // o app do WhatsApp Web travar por dentro (SPA de anos rodando headless
@@ -444,7 +460,7 @@ async function runWhatsappImport(jobId, pauseSeconds, onlyChanged = false) {
       await page.waitForTimeout(2000);
     }
 
-    const status = await getWaStatus();
+    const status = await getWaStatus(conta);
     if (!status.loggedIn) {
       job.status = 'error';
       job.message = 'WhatsApp Web não está logado — escaneie o QR Code primeiro.';
@@ -531,8 +547,10 @@ async function runWhatsappImport(jobId, pauseSeconds, onlyChanged = false) {
 
 module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModerador }) {
   app.get('/api/safer/whatsapp/status', requireAdminOrModerador, async (req, res) => {
+    const conta = contaOf(req);
+    if (!conta) return res.status(400).json({ error: 'Conta de WhatsApp inválida.' });
     try {
-      res.json(await getWaStatus());
+      res.json(await getWaStatus(conta));
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -544,7 +562,7 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
   // jeito). Sem auth de propósito simples de debug — remover depois.
   app.get('/api/safer/whatsapp/debug-dom', requireAdminOrModerador, async (req, res) => {
     try {
-      const page = await getWaPage();
+      const page = await getWaPage(contaOf(req) || DEFAULT_CONTA);
       const info = await page.evaluate(() => {
         const inputs = Array.from(document.querySelectorAll('input[type="text"]'))
           .map(i => ({ ariaLabel: i.getAttribute('aria-label'), value: i.value }));
@@ -563,7 +581,9 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
   // o bug.
   app.get('/api/safer/whatsapp/debug-activity', requireAdminOrModerador, async (req, res) => {
     try {
-      const page = await getWaPage();
+      const conta = contaOf(req) || DEFAULT_CONTA;
+      const lastActivitySnapshot = snapshotOf(conta);
+      const page = await getWaPage(conta);
       const { names, activity } = await collectSidebarNames(page);
       const rows = names.map(n => ({
         name: n,
@@ -590,7 +610,7 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     const q = String(req.query.q || '').trim();
     if (!q) return res.status(400).json({ error: 'Use ?q=termo (ex: ?q=Nicolas)' });
     try {
-      const page = await getWaPage();
+      const page = await getWaPage(contaOf(req) || DEFAULT_CONTA);
       await closeAnyDialog(page).catch(() => {});
       const searchBox = searchBoxLocator(page);
       await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
@@ -623,7 +643,7 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     if (!name) return res.status(400).json({ error: 'Use ?name=Nome exato (igual aparece na barra lateral)' });
     let page;
     try {
-      page = await getWaPage();
+      page = await getWaPage(contaOf(req) || DEFAULT_CONTA);
       await closeAnyDialog(page).catch(() => {});
       const searchBox = searchBoxLocator(page);
       await step('clicar na busca', () => searchBox.click({ timeout: 8000 }));
@@ -666,9 +686,12 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
   // exportação de todo mundo (que é o que /import/start com onlyChanged
   // faria na "primeira vez", com o snapshot ainda vazio).
   app.post('/api/safer/whatsapp/sync/baseline', requireAdminOrModerador, async (req, res) => {
+    const conta = contaOf(req);
+    if (!conta) return res.status(400).json({ error: 'Conta de WhatsApp inválida.' });
     try {
-      const page = await getWaPage();
-      const status = await getWaStatus();
+      const lastActivitySnapshot = snapshotOf(conta);
+      const page = await getWaPage(conta);
+      const status = await getWaStatus(conta);
       if (!status.loggedIn) return res.status(400).json({ error: 'WhatsApp Web não está logado — escaneie o QR Code primeiro.' });
       const { activity } = await collectSidebarNames(page);
       for (const [n, text] of activity) lastActivitySnapshot.set(n, text);
@@ -679,6 +702,8 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
   });
 
   app.post('/api/safer/whatsapp/import/start', requireAdminOrModerador, (req, res) => {
+    const conta = contaOf(req);
+    if (!conta) return res.status(400).json({ error: 'Conta de WhatsApp inválida.' });
     const pauseSeconds = Math.max(5, Number(req.body?.pauseSeconds) || 8);
     // onlyChanged: modo "sincronização automática" — só reprocessa contatos
     // com atividade nova desde a última checagem, em vez de todo mundo.
@@ -686,7 +711,7 @@ module.exports = function registerWhatsappSaferRoutes(app, { requireAdminOrModer
     const jobId = crypto.randomUUID();
     waJobs.set(jobId, { status: 'running', logs: [], files: [], total: 0, stopRequested: false, message: null, debugShot: null });
     res.json({ jobId });
-    runWhatsappImport(jobId, pauseSeconds, onlyChanged).catch((err) => {
+    runWhatsappImport(jobId, conta, pauseSeconds, onlyChanged).catch((err) => {
       const j = waJobs.get(jobId);
       if (j) { j.status = 'error'; j.message = err.message; }
     });
