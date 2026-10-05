@@ -529,6 +529,20 @@ let unikoFitLastComment = 0, unikoFitLastReaction = 0, unikoFitLastChat = 0;
 const pollUnikoFitPush = async () => {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
+    // 1ª passada: só descobre o MAIOR id de cada tabela e retorna, sem enviar nada. (Antes pegava os
+    // 50 registros MAIS ANTIGOS — sobravam milhares de antigos e cada ciclo de 15s reenviava 50
+    // deles como "novos", então todo restart do servidor disparava notificações velhas.)
+    if (unikoFitPushBaseline) {
+      const maxId = async (tabela) => {
+        const { data } = await supabase.from(tabela).select('id').order('id', { ascending: false }).limit(1);
+        return data?.[0]?.id || 0;
+      };
+      [unikoFitLastComment, unikoFitLastReaction, unikoFitLastChat] = await Promise.all([
+        maxId('uniko_fit_comments'), maxId('uniko_fit_reactions'), maxId('uniko_fit_chat'),
+      ]);
+      unikoFitPushBaseline = false;
+      return;
+    }
     const [{ data: coms }, { data: reacs }, { data: chats }] = await Promise.all([
       supabase.from('uniko_fit_comments').select('id,checkin_id,player,texto').gt('id', unikoFitLastComment).order('id', { ascending: true }).limit(50),
       supabase.from('uniko_fit_reactions').select('id,checkin_id,player,emoji').gt('id', unikoFitLastReaction).order('id', { ascending: true }).limit(50),
@@ -537,7 +551,6 @@ const pollUnikoFitPush = async () => {
     if (coms?.length)  unikoFitLastComment  = coms[coms.length - 1].id;
     if (reacs?.length) unikoFitLastReaction = reacs[reacs.length - 1].id;
     if (chats?.length) unikoFitLastChat     = chats[chats.length - 1].id;
-    if (unikoFitPushBaseline) { unikoFitPushBaseline = false; return; }
 
     // Comentário/reação: avisa o DONO do check-in (não quem comentou/reagiu).
     const checkinIds = [...new Set([...(coms || []).map(c => c.checkin_id), ...(reacs || []).map(r => r.checkin_id)])];
