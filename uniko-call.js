@@ -65,35 +65,52 @@ if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABA
   console.warn('[uniko-call] UNIKO_SECURITY_SUPABASE_URL/SERVICE_KEY não configurados — upload vai ser aceito, mas nada é gravado.');
 }
 
-async function transcribe(buffer, mimetype) {
-  if (!GROQ_KEY) throw new Error('GROQ_API_KEY não configurada no servidor');
+// Provedor de transcricao: OpenAI (gpt-4o-transcribe) quando ha OPENAI_API_KEY, senao Groq (Whisper).
+// TRANSCRIBE_PROVIDER=groq|openai forca um deles. Se o principal falhar e o outro estiver
+// configurado, tenta o outro antes de desistir.
+const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-transcribe';
+const PROVIDER = (process.env.TRANSCRIBE_PROVIDER || (OPENAI_KEY ? 'openai' : 'groq')).toLowerCase();
+
+async function transcribeVia(provider, buffer, mimetype) {
+  const cfg = provider === 'openai'
+    ? { name: 'OpenAI', key: OPENAI_KEY, keyVar: 'OPENAI_API_KEY', url: 'https://api.openai.com/v1/audio/transcriptions', model: OPENAI_MODEL }
+    : { name: 'Groq Whisper', key: GROQ_KEY, keyVar: 'GROQ_API_KEY', url: 'https://api.groq.com/openai/v1/audio/transcriptions', model: 'whisper-large-v3' };
+  if (!cfg.key) throw new Error(`${cfg.keyVar} nao configurada no servidor`);
   const form = new FormData();
   const isWav = /wav/i.test(mimetype || '');
   form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), isWav ? 'call.wav' : 'call.webm');
-  form.append('model', 'whisper-large-v3');
+  form.append('model', cfg.model);
   form.append('language', 'pt');
   form.append('temperature', '0'); // deterministico - menos invencao de palavras
-  // Contexto neutro (NAO inclui a frase do aviso - nao pode induzir o Whisper a ouvir um aviso que nao foi dito).
+  // Contexto neutro (NAO inclui a frase do aviso - nao pode induzir o modelo a ouvir um aviso que nao foi dito).
   form.append('prompt', 'Conversa telefonica em portugues do Brasil entre um atendente e um cliente.');
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${GROQ_KEY}` },
-      body: form,
-      signal: ac.signal,
-    });
+    res = await fetch(cfg.url, { method: 'POST', headers: { Authorization: `Bearer ${cfg.key}` }, body: form, signal: ac.signal });
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`Groq Whisper não respondeu em ${TRANSCRIBE_TIMEOUT_MS / 1000}s (timeout)`);
+    if (e.name === 'AbortError') throw new Error(`${cfg.name} nao respondeu em ${TRANSCRIBE_TIMEOUT_MS / 1000}s (timeout)`);
     throw e;
   } finally {
     clearTimeout(t);
   }
-  if (!res.ok) throw new Error(`Groq Whisper respondeu ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`${cfg.name} respondeu ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return data.text || '';
+}
+
+async function transcribe(buffer, mimetype) {
+  const other = PROVIDER === 'openai' ? 'groq' : 'openai';
+  try {
+    return await transcribeVia(PROVIDER, buffer, mimetype);
+  } catch (e) {
+    const otherConfigured = other === 'openai' ? !!OPENAI_KEY : !!GROQ_KEY;
+    if (!otherConfigured) throw e;
+    console.error(`[uniko-call] ${PROVIDER} falhou (${e.message}) — tentando ${other}...`);
+    return await transcribeVia(other, buffer, mimetype);
+  }
 }
 
 // O MediaRecorder do Chrome grava um .webm sem os metadados de duração no
@@ -213,7 +230,7 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     }
 
     try {
-      console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe() (Groq)...`);
+      console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe()...`);
       const text = await transcribe(fixedBuffer, req.file.mimetype);
       console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou (${text.length} caracteres): "${text.slice(0, 200)}"`);
       const consentGiven = hasConsentNotice(text);
