@@ -215,7 +215,7 @@ function prependAviso(callBuffer) {
     if (!fs.existsSync(AVISO_FILE)) return resolve(null);
     const ff = spawn('ffmpeg', ['-i', AVISO_FILE, '-i', 'pipe:0',
       '-filter_complex', '[0:a]aresample=48000,aformat=channel_layouts=mono[a0];[1:a]aresample=48000,aformat=channel_layouts=mono[a1];[a0][a1]concat=n=2:v=0:a=1[a]',
-      '-map', '[a]', '-c:a', 'libopus', '-b:a', '64k', '-f', 'webm', 'pipe:1']);
+      '-map', '[a]', '-c:a', 'libopus', '-b:a', '96k', '-f', 'webm', 'pipe:1']);
     const out = []; let err = '';
     const timer = setTimeout(() => ff.kill('SIGKILL'), 90000);
     ff.stdout.on('data', (d) => out.push(d));
