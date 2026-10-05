@@ -17,6 +17,8 @@
 // INDEPENDENTES: se o Groq falhar, o áudio já gravado continua ouvível.
 const { createClient } = require('@supabase/supabase-js');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const UPLOAD_TOKEN = 'uniko-call-rec'; // mesmo token hardcoded do lado da extensão (offscreen.js)
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
@@ -79,12 +81,13 @@ async function transcribeVia(provider, buffer, mimetype, retry429 = true) {
   if (!cfg.key) throw new Error(`${cfg.keyVar} nao configurada no servidor`);
   const form = new FormData();
   const isWav = /wav/i.test(mimetype || '');
-  form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), isWav ? 'call.wav' : 'call.webm');
+  const isFlac = /flac/i.test(mimetype || '');
+  form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), isWav ? 'call.wav' : isFlac ? 'call.flac' : 'call.webm');
   form.append('model', cfg.model);
   form.append('language', 'pt');
   form.append('temperature', '0'); // deterministico - menos invencao de palavras
   // Contexto neutro (NAO inclui a frase do aviso - nao pode induzir o modelo a ouvir um aviso que nao foi dito).
-  form.append('prompt', 'Conversa telefonica em portugues do Brasil entre um atendente e um cliente.');
+  form.append('prompt', 'Conversa telefonica em portugues do Brasil entre um atendente e um cliente. Transcreva fielmente apenas o que foi dito; nao complete, nao repita e nao invente palavras ou frases.');
   let res;
   // 429 (limite por minuto — comum em conta nova da OpenAI): espera o tempo sugerido e tenta de novo (até 3x).
   for (let attempt = 0; ; attempt++) {
@@ -178,7 +181,89 @@ async function upsertCallContact(name) {
   return data;
 }
 
+// ── Preparação do áudio pra transcrição ─────────────────────────────────────
+// Silêncio e ruído longos são o que faz o modelo "inventar" texto. Antes de transcrever,
+// remove os silêncios, nivela o volume (voz baixa fica audível) e converte pra FLAC 16 kHz mono.
+// SÓ pro envio à transcrição — o áudio guardado pra ouvir continua o original. Se o ffmpeg
+// falhar ou sobrar quase nada, segue com o áudio original.
+function prepareForTranscription(buffer) {
+  return new Promise((resolve) => {
+    const orig = { buffer, mimetype: 'audio/webm' };
+    const ff = spawn('ffmpeg', ['-i', 'pipe:0',
+      '-af', 'silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:stop_periods=-1:stop_duration=0.8:stop_threshold=-50dB,dynaudnorm=f=150:g=7',
+      '-ar', '16000', '-ac', '1', '-c:a', 'flac', '-f', 'flac', 'pipe:1']);
+    const out = [];
+    const timer = setTimeout(() => { ff.kill('SIGKILL'); }, 60000);
+    ff.stdout.on('data', (d) => out.push(d));
+    ff.stderr.on('data', () => {});
+    ff.on('error', (e) => { clearTimeout(timer); console.error('[uniko-call] ffmpeg indisponível pra preparar transcrição:', e.message); resolve(orig); });
+    ff.on('close', (code) => {
+      clearTimeout(timer);
+      const buf = Buffer.concat(out);
+      if (code !== 0 || buf.length < 2000) { console.warn(`[uniko-call] preparo do áudio não aproveitado (code ${code}, ${buf.length} bytes) — usando o original.`); return resolve(orig); }
+      resolve({ buffer: buf, mimetype: 'audio/flac' });
+    });
+    ff.stdin.on('error', () => {});
+    ff.stdin.end(buffer);
+  });
+}
+
+// Remove "frases fantasma" típicas de modelos de transcrição quando o áudio tem pouca fala
+// (legendas, agradecimentos de vídeo etc.) — não fazem parte de nenhuma ligação.
+const GHOST_PATTERNS = [
+  /legendas?\s+(pela|por|de)\s+[^.]*comunidade[^.]*\.?/gi,
+  /amara\.org/gi,
+  /transcri[cç][aã]o\s+e\s+legendas?[^.]*\.?/gi,
+  /obrigad[oa]\s+por\s+assistir[^.]*\.?/gi,
+  /inscreva-se\s+no\s+canal[^.]*\.?/gi,
+  /até\s+a\s+próxima[!.]?\s*$/gi,
+];
+function cleanTranscript(text) {
+  let t = String(text || '');
+  for (const re of GHOST_PATTERNS) t = t.replace(re, ' ');
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
+// ── Aviso prévio automático (áudio tocado pelo botão "Tocar aviso" da extensão) ──
+// Texto fixo; voz sintética (OpenAI TTS) gerada UMA vez e guardada em public/aviso-previo.mp3.
+// Pra trocar por uma gravação melhor é só substituir esse arquivo (ou apagar pra regenerar).
+const AVISO_TEXTO = process.env.AVISO_PREVIO_TEXTO ||
+  'Olá, tudo bem? Por questões de segurança, essa ligação está sendo gravada. Vou encaminhar seu atendimento para um atendente, tudo bem? Só um momento.';
+const AVISO_FILE = path.join(__dirname, 'public', 'aviso-previo.mp3');
+
+async function generateAvisoAudio() {
+  if (!OPENAI_KEY) throw new Error('OPENAI_API_KEY nao configurada — nao da pra gerar a voz do aviso');
+  const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+      voice: process.env.OPENAI_TTS_VOICE || 'coral',
+      input: AVISO_TEXTO,
+      instructions: 'Fale em português do Brasil, com tom cordial, claro e profissional, em ritmo calmo.',
+      response_format: 'mp3',
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI TTS respondeu ${res.status}: ${await res.text()}`);
+  fs.mkdirSync(path.dirname(AVISO_FILE), { recursive: true });
+  fs.writeFileSync(AVISO_FILE, Buffer.from(await res.arrayBuffer()));
+  console.log('[uniko-call] áudio do aviso prévio gerado em', AVISO_FILE);
+}
+
 module.exports = function registerUnikoCallRoutes(app, upload) {
+  app.get('/api/uniko-call/aviso-audio', async (req, res) => {
+    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
+    try {
+      if (!fs.existsSync(AVISO_FILE)) await generateAvisoAudio();
+      res.set('Content-Type', 'audio/mpeg');
+      res.set('Cache-Control', 'no-store');
+      res.sendFile(AVISO_FILE);
+    } catch (e) {
+      console.error('[uniko-call] aviso-audio falhou:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // upload = instância multer (memoryStorage) já criada em index.js — reaproveita.
   // Calibração (popup da extensão): transcreve ~10s de áudio de teste e diz se o aviso prévio
   // seria aceito. NADA é gravado — nem áudio, nem transcrição, nem contato.
@@ -188,7 +273,7 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     try {
       const fixed = /wav/i.test(req.file.mimetype || '') ? req.file.buffer : await remuxWebm(req.file.buffer); // WAV nao precisa de remux
       // Teste de calibração falha RÁPIDO em limite de uso (sem esperar/retentar) — o usuário está olhando a tela.
-      const text = (await transcribe(fixed, req.file.mimetype, { retry429: false })).trim();
+      const text = cleanTranscript(await transcribe(fixed, req.file.mimetype, { retry429: false }));
       res.json({ text, consentGiven: hasConsentNotice(text) });
     } catch (e) {
       console.error('[uniko-call] teste de calibração falhou:', e.message);
@@ -244,9 +329,13 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
 
     try {
       console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe()...`);
-      const text = await transcribe(fixedBuffer, req.file.mimetype);
+      const prepared = await prepareForTranscription(fixedBuffer);
+      const text = cleanTranscript(await transcribe(prepared.buffer, prepared.mimetype));
       console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou (${text.length} caracteres): "${text.slice(0, 200)}"`);
-      const consentGiven = hasConsentNotice(text);
+      // Aviso tocado pelo botão "Tocar aviso" (áudio fixo, garantido) OU detectado na fala do atendente.
+      const avisoPlayed = String(req.body.avisoPlayed || '') === 'true';
+      const consentGiven = avisoPlayed || hasConsentNotice(text);
+      if (avisoPlayed) console.log(`[uniko-call] recording id=${recording.id}: aviso prévio tocado pela extensão — consentimento garantido.`);
       const gruposBatidos = CONSENT_GROUPS.filter(g => g.some(stem => normalize(text).includes(stem))).map(g => g[0]);
       console.log(`[uniko-call] recording id=${recording.id}: consentGiven=${consentGiven} (grupos batidos: ${gruposBatidos.join(', ') || 'nenhum'}). Atualizando registro...`);
       if (consentGiven) {
