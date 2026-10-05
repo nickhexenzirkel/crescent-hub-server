@@ -208,6 +208,30 @@ function prepareForTranscription(buffer) {
   });
 }
 
+// Coloca o áudio do aviso prévio NO INÍCIO da gravação (aviso primeiro, depois a ligação), sem
+// sobrepor ninguém. Reencoda tudo em webm/opus mono. Se algo falhar, devolve o áudio original.
+function prependAviso(callBuffer) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(AVISO_FILE)) return resolve(null);
+    const ff = spawn('ffmpeg', ['-i', AVISO_FILE, '-i', 'pipe:0',
+      '-filter_complex', '[0:a]aresample=48000,aformat=channel_layouts=mono[a0];[1:a]aresample=48000,aformat=channel_layouts=mono[a1];[a0][a1]concat=n=2:v=0:a=1[a]',
+      '-map', '[a]', '-c:a', 'libopus', '-b:a', '64k', '-f', 'webm', 'pipe:1']);
+    const out = []; let err = '';
+    const timer = setTimeout(() => ff.kill('SIGKILL'), 90000);
+    ff.stdout.on('data', (d) => out.push(d));
+    ff.stderr.on('data', (d) => { err += d.toString(); });
+    ff.on('error', (e) => { clearTimeout(timer); console.error('[uniko-call] ffmpeg indisponível pra juntar o aviso:', e.message); resolve(null); });
+    ff.on('close', (code) => {
+      clearTimeout(timer);
+      const buf = Buffer.concat(out);
+      if (code !== 0 || buf.length < 2000) { console.error(`[uniko-call] juntar aviso falhou (code ${code}): ${err.slice(-200)}`); return resolve(null); }
+      resolve(buf);
+    });
+    ff.stdin.on('error', () => {});
+    ff.stdin.end(callBuffer);
+  });
+}
+
 // Remove "frases fantasma" típicas de modelos de transcrição quando o áudio tem pouca fala
 // (legendas, agradecimentos de vídeo etc.) — não fazem parte de nenhuma ligação.
 const GHOST_PATTERNS = [
@@ -309,7 +333,14 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     console.log(`[uniko-call] recording id=${recording.id}: iniciando remux (buffer original ${req.file.buffer.length} bytes)...`);
     // Corrige a duração do webm ANTES de tudo — mesmo buffer corrigido serve
     // tanto pro Storage (player) quanto pro Whisper (transcrição).
-    const fixedBuffer = await remuxWebm(req.file.buffer);
+    // Aviso tocado pelo botão: o áudio dele vai no começo do arquivo salvo (e é transcrito junto).
+    let fixedBuffer = null;
+    if (String(req.body.avisoPlayed || '') === 'true') {
+      try { if (!fs.existsSync(AVISO_FILE)) await generateAvisoAudio(); } catch (e) { console.error('[uniko-call] sem áudio do aviso pra juntar:', e.message); }
+      fixedBuffer = await prependAviso(req.file.buffer);
+      if (fixedBuffer) console.log(`[uniko-call] recording id=${recording.id}: aviso prévio colocado no início do áudio.`);
+    }
+    if (!fixedBuffer) fixedBuffer = await remuxWebm(req.file.buffer);
     console.log(`[uniko-call] recording id=${recording.id}: remux concluído (buffer final ${fixedBuffer.length} bytes).`);
 
     // Áudio e transcrição são passos independentes — um falhar não derruba o
