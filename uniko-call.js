@@ -68,7 +68,8 @@ if (process.env.UNIKO_SECURITY_SUPABASE_URL && process.env.UNIKO_SECURITY_SUPABA
 async function transcribe(buffer, mimetype) {
   if (!GROQ_KEY) throw new Error('GROQ_API_KEY não configurada no servidor');
   const form = new FormData();
-  form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), 'call.webm');
+  const isWav = /wav/i.test(mimetype || '');
+  form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), isWav ? 'call.wav' : 'call.webm');
   form.append('model', 'whisper-large-v3');
   form.append('language', 'pt');
   form.append('temperature', '0'); // deterministico - menos invencao de palavras
@@ -156,7 +157,7 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
     if (!req.file) return res.status(400).json({ error: 'nenhum áudio recebido' });
     try {
-      const fixed = await remuxWebm(req.file.buffer);
+      const fixed = /wav/i.test(req.file.mimetype || '') ? req.file.buffer : await remuxWebm(req.file.buffer); // WAV nao precisa de remux
       const text = (await transcribe(fixed, req.file.mimetype)).trim();
       res.json({ text, consentGiven: hasConsentNotice(text) });
     } catch (e) {
