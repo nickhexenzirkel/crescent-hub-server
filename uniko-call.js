@@ -71,6 +71,9 @@ async function transcribe(buffer, mimetype) {
   form.append('file', new Blob([buffer], { type: mimetype || 'audio/webm' }), 'call.webm');
   form.append('model', 'whisper-large-v3');
   form.append('language', 'pt');
+  form.append('temperature', '0'); // deterministico - menos invencao de palavras
+  // Contexto neutro (NAO inclui a frase do aviso - nao pode induzir o Whisper a ouvir um aviso que nao foi dito).
+  form.append('prompt', 'Conversa telefonica em portugues do Brasil entre um atendente e um cliente.');
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   let res;
