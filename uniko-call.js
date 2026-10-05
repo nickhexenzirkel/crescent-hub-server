@@ -85,16 +85,28 @@ async function transcribeVia(provider, buffer, mimetype) {
   form.append('temperature', '0'); // deterministico - menos invencao de palavras
   // Contexto neutro (NAO inclui a frase do aviso - nao pode induzir o modelo a ouvir um aviso que nao foi dito).
   form.append('prompt', 'Conversa telefonica em portugues do Brasil entre um atendente e um cliente.');
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
   let res;
-  try {
-    res = await fetch(cfg.url, { method: 'POST', headers: { Authorization: `Bearer ${cfg.key}` }, body: form, signal: ac.signal });
-  } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`${cfg.name} nao respondeu em ${TRANSCRIBE_TIMEOUT_MS / 1000}s (timeout)`);
-    throw e;
-  } finally {
-    clearTimeout(t);
+  // 429 (limite por minuto — comum em conta nova da OpenAI): espera o tempo sugerido e tenta de novo (até 3x).
+  for (let attempt = 0; ; attempt++) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), TRANSCRIBE_TIMEOUT_MS);
+    try {
+      res = await fetch(cfg.url, { method: 'POST', headers: { Authorization: `Bearer ${cfg.key}` }, body: form, signal: ac.signal });
+    } catch (e) {
+      if (e.name === 'AbortError') throw new Error(`${cfg.name} nao respondeu em ${TRANSCRIBE_TIMEOUT_MS / 1000}s (timeout)`);
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
+    if (res.status === 429 && attempt < 3) {
+      const body = await res.clone().text();
+      if (/insufficient_quota|credit/i.test(body)) break; // sem crédito: esperar não adianta
+      const wait = Math.min(Number(res.headers.get('retry-after')) || Number((body.match(/in (\d+(?:\.\d+)?)s/) || [])[1]) || 20, 30);
+      console.warn(`[uniko-call] ${cfg.name} 429 (limite por minuto) — aguardando ${wait}s e tentando de novo (${attempt + 1}/3)...`);
+      await new Promise(r => setTimeout(r, (wait + 1) * 1000));
+      continue;
+    }
+    break;
   }
   if (!res.ok) throw new Error(`${cfg.name} respondeu ${res.status}: ${await res.text()}`);
   const data = await res.json();
