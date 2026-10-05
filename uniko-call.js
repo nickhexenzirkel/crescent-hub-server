@@ -252,7 +252,7 @@ function cleanTranscript(text) {
 // Texto fixo; voz sintética (OpenAI TTS) gerada UMA vez e guardada em public/aviso-previo.mp3.
 // Pra trocar por uma gravação melhor é só substituir esse arquivo (ou apagar pra regenerar).
 const AVISO_TEXTO = process.env.AVISO_PREVIO_TEXTO ||
-  'Olá, tudo bem? Por questões de segurança, essa ligação está sendo gravada. Vou encaminhar seu atendimento para um atendente, tudo bem? Só um momento.';
+  'Olá, seja bem-vindo à 7 Benefícios. Por questões de segurança, a ligação está sendo gravada, estarei encaminhando essa ligação para um de nossos atendentes.';
 const AVISO_FILE = path.join(__dirname, 'public', 'aviso-previo.mp3');
 
 async function generateAvisoAudio() {
