@@ -289,22 +289,6 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
   });
 
   // upload = instância multer (memoryStorage) já criada em index.js — reaproveita.
-  // Calibração (popup da extensão): transcreve ~10s de áudio de teste e diz se o aviso prévio
-  // seria aceito. NADA é gravado — nem áudio, nem transcrição, nem contato.
-  app.post('/api/uniko-call/test', upload.single('audio'), async (req, res) => {
-    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
-    if (!req.file) return res.status(400).json({ error: 'nenhum áudio recebido' });
-    try {
-      const fixed = /wav/i.test(req.file.mimetype || '') ? req.file.buffer : await remuxWebm(req.file.buffer); // WAV nao precisa de remux
-      // Teste de calibração falha RÁPIDO em limite de uso (sem esperar/retentar) — o usuário está olhando a tela.
-      const text = cleanTranscript(await transcribe(fixed, req.file.mimetype, { retry429: false }));
-      res.json({ text, consentGiven: hasConsentNotice(text) });
-    } catch (e) {
-      console.error('[uniko-call] teste de calibração falhou:', e.message);
-      res.json({ error: e.message });
-    }
-  });
-
   app.post('/api/uniko-call/upload', upload.single('audio'), async (req, res) => {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
     if (!req.file) return res.status(400).json({ error: 'nenhum áudio recebido' });
