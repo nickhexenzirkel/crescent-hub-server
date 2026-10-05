@@ -72,7 +72,7 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-transcribe';
 const PROVIDER = (process.env.TRANSCRIBE_PROVIDER || (OPENAI_KEY ? 'openai' : 'groq')).toLowerCase();
 
-async function transcribeVia(provider, buffer, mimetype) {
+async function transcribeVia(provider, buffer, mimetype, retry429 = true) {
   const cfg = provider === 'openai'
     ? { name: 'OpenAI', key: OPENAI_KEY, keyVar: 'OPENAI_API_KEY', url: 'https://api.openai.com/v1/audio/transcriptions', model: OPENAI_MODEL }
     : { name: 'Groq Whisper', key: GROQ_KEY, keyVar: 'GROQ_API_KEY', url: 'https://api.groq.com/openai/v1/audio/transcriptions', model: 'whisper-large-v3' };
@@ -98,7 +98,7 @@ async function transcribeVia(provider, buffer, mimetype) {
     } finally {
       clearTimeout(t);
     }
-    if (res.status === 429 && attempt < 3) {
+    if (res.status === 429 && retry429 && attempt < 3) {
       const body = await res.clone().text();
       if (/insufficient_quota|credit/i.test(body)) break; // sem crédito: esperar não adianta
       const wait = Math.min(Number(res.headers.get('retry-after')) || Number((body.match(/in (\d+(?:\.\d+)?)s/) || [])[1]) || 20, 30);
@@ -113,15 +113,15 @@ async function transcribeVia(provider, buffer, mimetype) {
   return data.text || '';
 }
 
-async function transcribe(buffer, mimetype) {
+async function transcribe(buffer, mimetype, { retry429 = true } = {}) {
   const other = PROVIDER === 'openai' ? 'groq' : 'openai';
   try {
-    return await transcribeVia(PROVIDER, buffer, mimetype);
+    return await transcribeVia(PROVIDER, buffer, mimetype, retry429);
   } catch (e) {
     const otherConfigured = other === 'openai' ? !!OPENAI_KEY : !!GROQ_KEY;
     if (!otherConfigured) throw e;
     console.error(`[uniko-call] ${PROVIDER} falhou (${e.message}) — tentando ${other}...`);
-    return await transcribeVia(other, buffer, mimetype);
+    return await transcribeVia(other, buffer, mimetype, retry429);
   }
 }
 
@@ -187,7 +187,8 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     if (!req.file) return res.status(400).json({ error: 'nenhum áudio recebido' });
     try {
       const fixed = /wav/i.test(req.file.mimetype || '') ? req.file.buffer : await remuxWebm(req.file.buffer); // WAV nao precisa de remux
-      const text = (await transcribe(fixed, req.file.mimetype)).trim();
+      // Teste de calibração falha RÁPIDO em limite de uso (sem esperar/retentar) — o usuário está olhando a tela.
+      const text = (await transcribe(fixed, req.file.mimetype, { retry429: false })).trim();
       res.json({ text, consentGiven: hasConsentNotice(text) });
     } catch (e) {
       console.error('[uniko-call] teste de calibração falhou:', e.message);
