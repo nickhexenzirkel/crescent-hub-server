@@ -200,6 +200,20 @@ async function fetchAndStoreMedia(mediaId, msgType, category) {
   }
 }
 
+// Celular brasileiro tem duas grafias do MESMO número: com o 9 extra
+// (55 + DDD + 9 + 8 dígitos = 13) e sem ele (55 + DDD + 8 dígitos = 12). A Meta
+// manda o wa_id das mensagens numa delas e a agenda do celular (smb_app_state_sync)
+// costuma vir na outra — a busca por igualdade exata não casava e o contato
+// ficava só com o número (achado 06/out/2026 no Contratual: 50 contatos, todos
+// com wa_id de 12 dígitos). Devolve o número e suas variantes.
+function variantesWaId(waId) {
+  const d = String(waId || '').replace(/\D/g, '');
+  const out = new Set([waId]);
+  if (/^55\d{10}$/.test(d)) out.add(d.slice(0, 4) + '9' + d.slice(4)); // 12 -> 13 (insere o 9)
+  else if (/^55\d{2}9\d{8}$/.test(d)) out.add(d.slice(0, 4) + d.slice(5)); // 13 -> 12 (tira o 9)
+  return [...out];
+}
+
 // `category` (setor) faz parte da CHAVE do contato — a mesma pessoa pode
 // escrever pro WhatsApp do Faturamento E do Financeiro, e isso são dois
 // contatos/conversas diferentes (ver supabase_uniko_security_setores.sql,
@@ -226,7 +240,7 @@ async function upsertContact(waId, profileName, category) {
   let knownName = null;
   try {
     const { data: known } = await supabaseSecurity.from('uniko_security_known_names')
-      .select('name').eq('wa_id', waId).eq('category', category).maybeSingle();
+      .select('name').in('wa_id', variantesWaId(waId)).eq('category', category).limit(1).maybeSingle();
     knownName = known?.name || null;
   } catch {}
   // Upsert ATÔMICO (não INSERT simples) — corrige uma corrida real (achado
@@ -356,10 +370,13 @@ async function processAppStateSync(value) {
     if (!waId || !name) continue;
     await supabaseSecurity.from('uniko_security_known_names')
       .upsert({ wa_id: waId, category, name, updated_at: new Date().toISOString() }, { onConflict: 'wa_id,category' });
-    const { data: existing } = await supabaseSecurity.from('uniko_security_contacts')
-      .select('id,name,name_manual').eq('wa_id', waId).eq('category', category).maybeSingle();
-    if (!existing || existing.name_manual || existing.name === name) continue;
-    await supabaseSecurity.from('uniko_security_contacts').update({ name }).eq('id', existing.id);
+    // Contato pode existir sob qualquer grafia do número (com/sem o 9 extra).
+    const { data: existentes } = await supabaseSecurity.from('uniko_security_contacts')
+      .select('id,name,name_manual').in('wa_id', variantesWaId(waId)).eq('category', category);
+    for (const existing of existentes || []) {
+      if (existing.name_manual || existing.name === name) continue;
+      await supabaseSecurity.from('uniko_security_contacts').update({ name }).eq('id', existing.id);
+    }
   }
 }
 
