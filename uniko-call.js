@@ -262,7 +262,7 @@ async function generateAvisoAudio() {
     headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
-      voice: process.env.OPENAI_TTS_VOICE || 'coral',
+      voice: process.env.OPENAI_TTS_VOICE || 'onyx',
       input: AVISO_TEXTO,
       instructions: 'Fale em português do Brasil, com tom cordial, claro e profissional, em ritmo calmo.',
       response_format: 'mp3',
