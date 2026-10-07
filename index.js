@@ -112,7 +112,7 @@ const YTDLP_PROXY = process.env.YTDLP_PROXY || '';
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','X-Attendant-Token'] }));
 app.options('*', cors());
 // Limite padrão do body-parser é 100kb — a Biblioteca Local manda a capa do
 // MP3 (extraída do ID3) como base64 dentro do JSON de POST /api/queue, e uma
@@ -3927,7 +3927,7 @@ require('./unikoSecurityBackup')(app, { requireAdmin });
 // Lógica isolada em uniko-call.js.
 // ═══════════════════════════════════════════════════════
 const unikoCallUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
-require('./uniko-call')(app, unikoCallUpload);
+require('./uniko-call')(app, unikoCallUpload, { supabase, bcrypt, jwt, JWT_SECRET, normCpf });
 
 // ═══════════════════════════════════════════════════════
 // PLAYWRIGHT — Download de vídeo para o Uniko Wave

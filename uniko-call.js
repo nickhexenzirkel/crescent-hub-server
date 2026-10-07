@@ -274,7 +274,62 @@ async function generateAvisoAudio() {
   console.log('[uniko-call] áudio do aviso prévio gerado em', AVISO_FILE);
 }
 
-module.exports = function registerUnikoCallRoutes(app, upload) {
+// ── Atendente (quem fez a ligação) ──────────────────────────────────────────
+// A extensão faz login (CPF + senha do Portal) no popup e guarda um token de 30 dias, escopo
+// 'uniko-call' (não serve pra nada além disso). Cada upload leva esse token; aqui ele vira
+// id/nome do colaborador + setores (tags `colegas_setores` da tabela settings do Portal).
+const ATTENDANT_TOKEN_DAYS = 30;
+const loginFails = new Map(); // cpf → { n, until } — trava força bruta (5 erros = 15 min)
+
+async function sectorsOfEmployee(supabase, name) {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'colegas_setores').maybeSingle();
+    const map = data?.value ? JSON.parse(data.value) : {};
+    return Array.isArray(map[name]) ? map[name].filter(s => typeof s === 'string') : [];
+  } catch (e) { console.warn('[uniko-call] não consegui ler os setores:', e.message); return []; }
+}
+
+async function resolveAttendant(deps, token) {
+  if (!token || !deps) return null;
+  try {
+    const p = deps.jwt.verify(token, deps.JWT_SECRET);
+    if (p.scope !== 'uniko-call' || !p.id) return null;
+    const { data: emp } = await deps.supabase.from('employees').select('id,name,active,acesso_bloqueado').eq('id', p.id).maybeSingle();
+    if (!emp || !emp.active || emp.acesso_bloqueado) return null;
+    return { id: String(emp.id), name: emp.name, sectors: await sectorsOfEmployee(deps.supabase, emp.name) };
+  } catch { return null; }
+}
+
+module.exports = function registerUnikoCallRoutes(app, upload, deps) {
+  app.post('/api/uniko-call/login', async (req, res) => {
+    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
+    if (!deps) return res.status(503).json({ error: 'login indisponível no servidor' });
+    const cpf = deps.normCpf(req.body?.cpf);
+    const password = String(req.body?.password || '');
+    if (cpf.length !== 11 || !password) return res.status(400).json({ error: 'CPF e senha obrigatórios' });
+    const f = loginFails.get(cpf);
+    if (f && f.n >= 5 && f.until > Date.now()) return res.status(429).json({ error: 'Muitas tentativas. Aguarde alguns minutos.' });
+    const fail = (status, error) => {
+      const cur = loginFails.get(cpf);
+      loginFails.set(cpf, { n: (cur && cur.until > Date.now() ? cur.n : 0) + 1, until: Date.now() + 15 * 60 * 1000 });
+      return res.status(status).json({ error });
+    };
+    const { data: emp } = await deps.supabase.from('employees').select('id,name,password_hash,active,acesso_bloqueado').eq('cpf', cpf).eq('active', true).maybeSingle();
+    if (!emp || !(await deps.bcrypt.compare(password, emp.password_hash))) return fail(401, 'CPF ou senha incorretos');
+    if (emp.acesso_bloqueado) return res.status(403).json({ error: 'Seu acesso ao Uniko foi desabilitado pelo RH.' });
+    loginFails.delete(cpf);
+    const token = deps.jwt.sign({ id: emp.id, scope: 'uniko-call' }, deps.JWT_SECRET, { expiresIn: `${ATTENDANT_TOKEN_DAYS}d` });
+    res.json({ token, name: emp.name, sectors: await sectorsOfEmployee(deps.supabase, emp.name) });
+  });
+
+  // A extensão checa ao abrir o popup se o token ainda vale (e traz o setor atual).
+  app.get('/api/uniko-call/whoami', async (req, res) => {
+    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
+    const a = await resolveAttendant(deps, req.get('X-Attendant-Token'));
+    if (!a) return res.status(401).json({ error: 'sessão expirada' });
+    res.json({ name: a.name, sectors: a.sectors });
+  });
+
   app.get('/api/uniko-call/aviso-audio', async (req, res) => {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
     try {
@@ -297,16 +352,26 @@ module.exports = function registerUnikoCallRoutes(app, upload) {
     if (!supabaseCall) { console.error('[uniko-call] Supabase não configurado — áudio recebido e descartado.'); return; }
 
     const { contactName, startedAt, endedAt } = req.body;
+    // Sem login (ou token expirado) a gravação NÃO é recusada — perder uma ligação é pior que
+    // ficar sem atendente; ela aparece em "Sem atendente identificado".
+    const attendant = await resolveAttendant(deps, req.body.attendantToken);
+    if (!attendant) console.warn('[uniko-call] upload sem atendente identificado (extensão sem login ou token expirado).');
     let contact, recording;
     try {
       contact = await upsertCallContact(contactName);
-      const { data, error } = await supabaseCall.from('uniko_call_recordings')
-        .insert({
-          contact_id: contact.id,
-          started_at: startedAt || new Date().toISOString(),
-          ended_at: endedAt || null,
-          status: 'processing',
-        }).select().single();
+      const row = {
+        contact_id: contact.id,
+        started_at: startedAt || new Date().toISOString(),
+        ended_at: endedAt || null,
+        status: 'processing',
+      };
+      if (attendant) Object.assign(row, { attendant_id: attendant.id, attendant_name: attendant.name, sectors: attendant.sectors });
+      let { data, error } = await supabaseCall.from('uniko_call_recordings').insert(row).select().single();
+      if (error && /attendant_|sectors/.test(error.message)) { // SQL do atendente ainda não rodou — grava mesmo assim
+        console.error('[uniko-call] colunas de atendente ausentes — rode supabase_uniko_call_atendente.sql. Gravando sem atendente.');
+        delete row.attendant_id; delete row.attendant_name; delete row.sectors;
+        ({ data, error } = await supabaseCall.from('uniko_call_recordings').insert(row).select().single());
+      }
       if (error) throw new Error(error.message);
       recording = data;
     } catch (e) {
