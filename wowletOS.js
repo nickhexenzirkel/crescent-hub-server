@@ -25,24 +25,30 @@ const jobs = new Map();
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
 const slug = (s) => String(s || 'sem-nome').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90) || 'sem-nome';
 
+const log = (job, msg) => { job.logs.push({ t: Date.now(), msg }); if (job.logs.length > 600) job.logs.shift(); };
+
 async function screenshot(job, page, nome) {
   try { await page.screenshot({ path: path.join(job.dir, `erro-${nome}.png`), fullPage: true }); } catch { /* sem print */ }
 }
 
-async function login(page, usuario, senha) {
+async function login(job, page, usuario, senha) {
+  log(job, 'Abrindo a tela de login da Wowlet…');
   await page.goto(`${BASE}/sessions/new`, { waitUntil: 'domcontentloaded', timeout: T_NAV });
   await page.getByRole('textbox', { name: 'Nome de Usuário' }).fill(usuario);
   await page.getByRole('textbox', { name: 'Senha' }).fill(senha);
+  log(job, 'Enviando usuário e senha…');
   await page.getByRole('textbox', { name: 'Senha' }).press('Enter');
   await page.getByRole('link', { name: 'Credenciados' }).first().waitFor({ timeout: T_NAV })
     .catch(() => { throw new Error('Login na Wowlet não passou (usuário/senha errados, captcha ou bloqueio).'); });
+  log(job, 'Login feito.');
 }
 
 /** Busca o credenciado e entra nele ("Acessar"). Tenta o nome inteiro e depois pedaços menores. */
-async function acessarCredenciado(page, nome) {
+async function acessarCredenciado(job, page, nome) {
   const alvo = norm(nome);
   const buscas = [...new Set([nome.trim(), nome.split(' - ')[0].trim(), nome.trim().split(/\s+/)[0]])].filter(Boolean);
   for (const termo of buscas) {
+    log(job, `Indo em Credenciados e pesquisando "${termo}"…`);
     await page.getByRole('link', { name: 'Credenciados' }).first().click();
     await page.waitForLoadState('domcontentloaded');
     let campo = page.getByRole('searchbox').first();
@@ -56,6 +62,7 @@ async function acessarCredenciado(page, nome) {
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     const linhas = page.getByRole('row').filter({ hasText: new RegExp(termo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
     const n = await linhas.count();
+    log(job, `${n} linha(s) encontrada(s) para "${termo}".`);
     let escolhida = null;
     for (let i = 0; i < n; i++) {
       const txt = norm(await linhas.nth(i).innerText().catch(() => ''));
@@ -69,28 +76,36 @@ async function acessarCredenciado(page, nome) {
       acessar = escolhida.getByRole('link', { name: 'Acessar' }).first();
     }
     if (!(await acessar.count())) continue;
+    log(job, 'Clicando em Acessar…');
     await acessar.click();
-    await page.getByRole('link', { name: 'Ordens de Serviço', exact: true }).waitFor({ timeout: T_NAV });
+    await page.waitForLoadState('domcontentloaded');
+    log(job, 'Dentro do credenciado. Indo direto para /provider_orders.');
+    await page.goto(`${BASE}/provider_orders`, { waitUntil: 'domcontentloaded', timeout: T_NAV });
     return;
   }
   throw new Error(`Credenciado não encontrado na Wowlet: ${nome}`);
 }
 
 /** Dentro do credenciado: acha a ordem pelo ID e salva o PDF. Devolve o caminho do arquivo. */
-async function baixarOrdem(page, id, destino) {
-  await page.getByRole('link', { name: 'Ordens de Serviço', exact: true }).click();
+async function baixarOrdem(job, page, id, destino) {
+  log(job, `OS ${id}: abrindo /provider_orders…`);
+  await page.goto(`${BASE}/provider_orders`, { waitUntil: 'domcontentloaded', timeout: T_NAV });
   const campo = page.locator('input[name="order_id"]');
   await campo.waitFor({ timeout: T_NAV });
+  log(job, `OS ${id}: preenchendo o ID e clicando em Buscar…`);
   await campo.fill(id);
   await page.getByRole('button', { name: 'Buscar' }).first().click();
   const link = page.getByRole('link', { name: id }).first();
   await link.waitFor({ timeout: 20000 }).catch(() => { throw new Error('Ordem não encontrada nesse credenciado.'); });
+  log(job, `OS ${id}: abrindo a ordem…`);
   await link.click();
   // Ctrl+P da página da ordem: em headless o equivalente é page.pdf() (imprime como a janela de impressão).
   await page.getByText(/Ordem de Serviço:/).first().waitFor({ timeout: T_NAV });
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  log(job, `OS ${id}: imprimindo a página em PDF (Ctrl+P)…`);
   await page.pdf({ path: destino, format: 'A4', printBackground: true, margin: { top: '10mm', bottom: '10mm', left: '8mm', right: '8mm' } });
   if (!fs.existsSync(destino) || fs.statSync(destino).size < 500) throw new Error('PDF baixado veio vazio.');
+  log(job, `OS ${id}: PDF salvo (${Math.round(fs.statSync(destino).size / 1024)} KB).`);
 }
 
 async function rodar(job, { usuario, senha }) {
@@ -109,9 +124,11 @@ async function rodar(job, { usuario, senha }) {
       const page = await context.newPage();
       page.setDefaultTimeout(T_NAV);
       try {
-        await login(page, usuario, senha);
-        await acessarCredenciado(page, cred);
+        log(job, `── Credenciado: ${cred} (${itens.length} ordem(ns))`);
+        await login(job, page, usuario, senha);
+        await acessarCredenciado(job, page, cred);
       } catch (e) {
+        log(job, `ERRO no credenciado ${cred}: ${e.message}`);
         await screenshot(job, page, slug(cred));
         itens.forEach((it) => { it.estado = 'erro'; it.msg = e.message; });
         await context.close().catch(() => {});
@@ -123,11 +140,12 @@ async function rodar(job, { usuario, senha }) {
         const destino = path.join(job.dir, `${it.idx}.pdf`);
         for (let tentativa = 1; tentativa <= 2; tentativa++) {
           try {
-            await baixarOrdem(page, it.os, destino);
+            await baixarOrdem(job, page, it.os, destino);
             it.estado = 'ok'; it.msg = ''; it.arquivo = destino;
             break;
           } catch (e) {
             it.estado = 'erro'; it.msg = e.message;
+            log(job, `OS ${it.os}: falhou (tentativa ${tentativa}/2) — ${e.message}`);
             if (tentativa === 2) await screenshot(job, page, `${it.idx}-${it.os}`);
             else await page.goBack().catch(() => {});
           }
@@ -136,6 +154,7 @@ async function rodar(job, { usuario, senha }) {
       await context.close().catch(() => {});
     }
     job.status = job.cancelado ? 'cancelado' : 'concluido';
+    log(job, job.cancelado ? 'Cancelado.' : 'Concluído.');
   } catch (e) {
     job.status = 'erro'; job.erro = e.message;
   } finally {
@@ -148,7 +167,7 @@ async function rodar(job, { usuario, senha }) {
 
 function publico(job) {
   return {
-    id: job.id, status: job.status, erro: job.erro || null,
+    id: job.id, status: job.status, erro: job.erro || null, logs: job.logs.slice(-250),
     itens: job.itens.map(({ idx, os: o, credenciado, setor, secretaria, estado, msg }) => ({ idx, os: o, credenciado, setor, secretaria, estado, msg })),
   };
 }
@@ -168,7 +187,7 @@ module.exports = function registerWowletOS(app, { requireAdmin }) {
     if ([...jobs.values()].some((j) => j.status === 'rodando')) return res.status(409).json({ error: 'Já existe um download em andamento. Aguarde terminar.' });
     const id = crypto.randomUUID();
     const job = {
-      id, status: 'fila', dir: fs.mkdtempSync(path.join(os.tmpdir(), 'wowlet-os-')),
+      id, status: 'fila', logs: [], dir: fs.mkdtempSync(path.join(os.tmpdir(), 'wowlet-os-')),
       itens: itens.map((it, idx) => ({
         idx, os: String(it.os || '').trim(), credenciado: String(it.credenciado || '').trim(),
         setor: String(it.setor || ''), secretaria: String(it.secretaria || ''), estado: 'fila', msg: '',
@@ -176,6 +195,7 @@ module.exports = function registerWowletOS(app, { requireAdmin }) {
     };
     if (!job.itens.length) return res.status(400).json({ error: 'Nenhuma ordem válida (faltou ID ou credenciado).' });
     jobs.set(id, job);
+    log(job, `Iniciando: ${job.itens.length} ordem(ns).`);
     rodar(job, { usuario: String(usuario), senha: String(senha) }).catch((e) => { job.status = 'erro'; job.erro = e.message; job.fim = Date.now(); });
     res.json(publico(job));
   });
