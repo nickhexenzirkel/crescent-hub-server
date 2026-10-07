@@ -3906,7 +3906,6 @@ app.get('/api/faturamento/consumo/status/:jobId', requireAuth, (req, res) => {
 // de status/start/stop/download de arquivo) — ver esse arquivo pro detalhe.
 // ═══════════════════════════════════════════════════════
 require('./whatsappSafer')(app, { requireAdminOrModerador });
-require('./wowletOS')(app, { requireAdmin });  // Oficina Estelar → Baixar Ordens de Serviço (só admin)
 
 // ═══════════════════════════════════════════════════════
 // UNIKO SECURITY — Webhook oficial da WhatsApp Cloud API (Coexistence)
