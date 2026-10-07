@@ -37,9 +37,17 @@ async function login(job, page, usuario, senha) {
   await page.getByRole('textbox', { name: 'Nome de Usuário' }).fill(usuario);
   await page.getByRole('textbox', { name: 'Senha' }).fill(senha);
   log(job, 'Enviando usuário e senha…');
-  await page.getByRole('textbox', { name: 'Senha' }).press('Enter');
-  await page.getByRole('link', { name: 'Credenciados' }).first().waitFor({ timeout: T_NAV })
-    .catch(() => { throw new Error('Login na Wowlet não passou (usuário/senha errados, captcha ou bloqueio).'); });
+  const botao = page.getByRole('button', { name: /entrar|login|acessar|enviar/i }).first();
+  if (await botao.count()) await botao.click(); else await page.getByRole('textbox', { name: 'Senha' }).press('Enter');
+  // sucesso = saiu de /sessions (não depende do menu estar visível no headless)
+  const saiu = await page.waitForURL((u) => !/\/sessions/.test(u.pathname), { timeout: 20000 }).then(() => true).catch(() => false);
+  const url = page.url();
+  log(job, `Depois do login a URL é: ${url}`);
+  if (!saiu) {
+    const texto = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240);
+    log(job, `Texto da página: ${texto}`);
+    throw new Error(`Login na Wowlet não passou. A página mostrou: "${texto}"`);
+  }
   log(job, 'Login feito.');
 }
 
