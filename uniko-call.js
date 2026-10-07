@@ -324,26 +324,17 @@ module.exports = function registerUnikoCallRoutes(app, upload, deps) {
     res.json({ token, name: emp.name, sectors: await sectorsOfEmployee(deps.supabase, emp.name) });
   });
 
-  // A extensão checa ao abrir o popup se o token ainda vale (e traz o setor atual).
-  app.get('/api/uniko-call/whoami', async (req, res) => {
+  // A extensão checa ao abrir o popup se o token ainda vale (e traz o setor atual). O token vai no CORPO
+  // (POST) — cabeçalho personalizado não é confiável por trás de proxy. `expired: true` só quando o
+  // token é realmente inválido; qualquer outra falha o popup trata como "sem resposta" e mantém o login.
+  const whoami = async (req, res) => {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
-    const a = await resolveAttendant(deps, req.get('X-Attendant-Token'));
-    if (!a) return res.status(401).json({ error: 'sessão expirada' });
+    const a = await resolveAttendant(deps, req.body?.token || req.get('X-Attendant-Token'));
+    if (!a) return res.status(401).json({ error: 'sessão expirada', expired: true });
     res.json({ name: a.name, sectors: a.sectors });
-  });
-
-  app.get('/api/uniko-call/aviso-audio', async (req, res) => {
-    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
-    try {
-      if (!fs.existsSync(AVISO_FILE)) await generateAvisoAudio();
-      res.set('Content-Type', 'audio/mpeg');
-      res.set('Cache-Control', 'no-store');
-      res.sendFile(AVISO_FILE);
-    } catch (e) {
-      console.error('[uniko-call] aviso-audio falhou:', e.message);
-      res.status(500).json({ error: e.message });
-    }
-  });
+  };
+  app.post('/api/uniko-call/whoami', whoami);
+  app.get('/api/uniko-call/whoami', whoami);
 
   // upload = instância multer (memoryStorage) já criada em index.js — reaproveita.
   app.post('/api/uniko-call/upload', upload.single('audio'), async (req, res) => {
