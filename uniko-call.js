@@ -290,14 +290,16 @@ async function sectorsOfEmployee(supabase, name) {
 }
 
 async function resolveAttendant(deps, token) {
-  if (!token || !deps) return null;
+  if (!deps) { console.warn('[uniko-call] atendente: servidor sem deps (login indisponível).'); return null; }
+  if (!token) { console.warn('[uniko-call] atendente: o upload veio SEM token — a extensão não está logada (popup) ou não enviou o token.'); return null; }
   try {
     const p = deps.jwt.verify(token, deps.JWT_SECRET);
-    if (p.scope !== 'uniko-call' || !p.id) return null;
-    const { data: emp } = await deps.supabase.from('employees').select('id,name,active,acesso_bloqueado').eq('id', p.id).maybeSingle();
-    if (!emp || !emp.active || emp.acesso_bloqueado) return null;
+    if (p.scope !== 'uniko-call' || !p.id) { console.warn('[uniko-call] atendente: token com escopo inválido.'); return null; }
+    const { data: emp, error } = await deps.supabase.from('employees').select('id,name,active,acesso_bloqueado').eq('id', p.id).maybeSingle();
+    if (error) { console.warn('[uniko-call] atendente: erro ao buscar o colaborador:', error.message); return null; }
+    if (!emp || !emp.active || emp.acesso_bloqueado) { console.warn('[uniko-call] atendente: colaborador não encontrado, inativo ou bloqueado.'); return null; }
     return { id: String(emp.id), name: emp.name, sectors: await sectorsOfEmployee(deps.supabase, emp.name) };
-  } catch { return null; }
+  } catch (e) { console.warn('[uniko-call] atendente: token inválido ou expirado —', e.message); return null; }
 }
 
 module.exports = function registerUnikoCallRoutes(app, upload, deps) {
