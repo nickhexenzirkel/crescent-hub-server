@@ -336,6 +336,20 @@ module.exports = function registerUnikoCallRoutes(app, upload, deps) {
   app.post('/api/uniko-call/whoami', whoami);
   app.get('/api/uniko-call/whoami', whoami);
 
+  // Áudio do aviso prévio (popup: "Ouvir o aviso"). Gera a voz na 1ª vez se o arquivo não existir.
+  app.get('/api/uniko-call/aviso-audio', async (req, res) => {
+    if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
+    try {
+      if (!fs.existsSync(AVISO_FILE)) await generateAvisoAudio();
+      res.set('Content-Type', 'audio/mpeg');
+      res.set('Cache-Control', 'no-store');
+      res.sendFile(AVISO_FILE);
+    } catch (e) {
+      console.error('[uniko-call] aviso-audio falhou:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // upload = instância multer (memoryStorage) já criada em index.js — reaproveita.
   app.post('/api/uniko-call/upload', upload.single('audio'), async (req, res) => {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
