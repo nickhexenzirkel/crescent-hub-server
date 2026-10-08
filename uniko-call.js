@@ -416,8 +416,12 @@ module.exports = function registerUnikoCallRoutes(app, upload, deps) {
 
     try {
       console.log(`[uniko-call] recording id=${recording.id}: chamando transcribe()...`);
-      const prepared = await prepareForTranscription(fixedBuffer);
-      const text = cleanTranscript(await transcribe(prepared.buffer, prepared.mimetype));
+      // Com aviso tocado, transcreve SÓ a ligação (sem o aviso colado na frente — o modelo tendia a parar
+      // depois do trecho limpo do aviso e perder a conversa) e põe o texto fixo do aviso na frente.
+      const avisoNoInicio = String(req.body.avisoPlayed || '') === 'true' && fixedBuffer !== null && fs.existsSync(AVISO_FILE);
+      const prepared = await prepareForTranscription(avisoNoInicio ? req.file.buffer : fixedBuffer);
+      let text = cleanTranscript(await transcribe(prepared.buffer, prepared.mimetype));
+      if (avisoNoInicio) text = `${AVISO_TEXTO} ${text}`.trim();
       console.log(`[uniko-call] recording id=${recording.id}: transcribe() voltou (${text.length} caracteres): "${text.slice(0, 200)}"`);
       // Aviso tocado pelo botão "Tocar aviso" (áudio fixo, garantido) OU detectado na fala do atendente.
       const avisoPlayed = String(req.body.avisoPlayed || '') === 'true';
