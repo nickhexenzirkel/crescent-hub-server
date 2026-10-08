@@ -3927,7 +3927,7 @@ require('./unikoSecurityBackup')(app, { requireAdmin });
 // Lógica isolada em uniko-call.js.
 // ═══════════════════════════════════════════════════════
 const unikoCallUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
-require('./uniko-call')(app, unikoCallUpload, { supabase, bcrypt, jwt, JWT_SECRET, normCpf });
+require('./uniko-call')(app, unikoCallUpload, { supabase, bcrypt, jwt, JWT_SECRET, normCpf, requireAdmin });
 
 // ═══════════════════════════════════════════════════════
 // PLAYWRIGHT — Download de vídeo para o Uniko Wave

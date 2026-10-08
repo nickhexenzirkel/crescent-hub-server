@@ -302,6 +302,82 @@ async function resolveAttendant(deps, token) {
   } catch (e) { console.warn('[uniko-call] atendente: token inválido ou expirado —', e.message); return null; }
 }
 
+
+// ── Transcrever de novo (botão no Uniko Call) ───────────────────────────────
+// Baixa o áudio guardado no Storage e refaz só a transcrição. Nunca mexe no áudio nem no consentimento
+// já gravado — exceto quando a transcrição volta e o aviso prévio não aparece (mesma regra do upload).
+const retranscribing = new Set();
+
+// Corta os primeiros `seconds` do áudio (o aviso que o servidor colou na frente) e devolve um webm novo.
+function cutStart(buffer, seconds) {
+  return new Promise((resolve) => {
+    const ff = spawn('ffmpeg', ['-ss', String(seconds), '-i', 'pipe:0', '-c:a', 'libopus', '-b:a', '48k', '-f', 'webm', 'pipe:1']);
+    const out = [];
+    ff.stdout.on('data', (d) => out.push(d));
+    ff.stderr.on('data', () => {});
+    ff.on('error', () => resolve(null));
+    ff.on('close', (code) => { const b = Buffer.concat(out); resolve(code === 0 && b.length > 2000 ? b : null); });
+    ff.stdin.on('error', () => {});
+    ff.stdin.end(buffer);
+  });
+}
+
+// Duração do mp3 do aviso (segundos) — lida do próprio ffmpeg, sem depender de ffprobe.
+function avisoSeconds() {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(AVISO_FILE)) return resolve(null);
+    const ff = spawn('ffmpeg', ['-i', AVISO_FILE, '-f', 'null', '-']);
+    let err = '';
+    ff.stderr.on('data', (d) => { err += d.toString(); });
+    ff.on('error', () => resolve(null));
+    ff.on('close', () => {
+      const m = [...err.matchAll(/time=(\d+):(\d+):(\d+\.?\d*)/g)].pop();
+      resolve(m ? (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]) : null);
+    });
+  });
+}
+
+async function retranscribe(id) {
+  const log = (m) => console.log(`[uniko-call] retranscrever id=${id}: ${m}`);
+  try {
+    const { data: row, error } = await supabaseCall.from('uniko_call_recordings').select('id, consent_given').eq('id', id).single();
+    if (error) throw new Error(error.message);
+    const dl = await supabaseCall.storage.from('uniko-call').download(`${id}.webm`);
+    if (dl.error) throw new Error('não consegui baixar o áudio: ' + (dl.error.message || 'arquivo ausente'));
+    const audio = Buffer.from(await dl.data.arrayBuffer());
+    log(`áudio baixado (${audio.length} bytes), transcrevendo...`);
+
+    const run = async (buf) => { const p = await prepareForTranscription(buf); return cleanTranscript(await transcribe(p.buffer, p.mimetype)); };
+    let text = await run(audio);
+
+    // Voltou só o aviso (modelo parou depois dele)? Corta o aviso do começo e transcreve o resto.
+    if (text.length < AVISO_TEXTO.length + 40 && hasConsentNotice(text)) {
+      const sec = await avisoSeconds();
+      const rest = sec ? await cutStart(audio, sec + 0.3) : null;
+      if (rest) {
+        const more = await run(rest);
+        log(`só o aviso na 1ª passada; resto do áudio deu ${more.length} caracteres.`);
+        if (more) text = `${AVISO_TEXTO} ${more}`.trim();
+      }
+    }
+
+    const consent = row.consent_given === true || hasConsentNotice(text);
+    if (!consent) {
+      await deleteAudio(id);
+      await supabaseCall.from('uniko_call_recordings').update({ transcript: null, audio_url: null, status: 'done', consent_given: false, error: null }).eq('id', id);
+      log('aviso prévio não identificado — gravação apagada (mesma regra do upload).');
+      return;
+    }
+    const { error: updErr } = await supabaseCall.from('uniko_call_recordings')
+      .update({ transcript: text, status: 'done', consent_given: true, error: null }).eq('id', id);
+    if (updErr) throw new Error(updErr.message);
+    log(`pronto (${text.length} caracteres).`);
+  } catch (e) {
+    console.error(`[uniko-call] retranscrever id=${id}: falhou:`, e.message);
+    await supabaseCall.from('uniko_call_recordings').update({ status: 'error', error: e.message }).eq('id', id).then(() => {}, () => {});
+  } finally { retranscribing.delete(id); }
+}
+
 module.exports = function registerUnikoCallRoutes(app, upload, deps) {
   app.post('/api/uniko-call/login', async (req, res) => {
     if (req.get('Authorization') !== `Bearer ${UPLOAD_TOKEN}`) return res.sendStatus(401);
@@ -348,6 +424,22 @@ module.exports = function registerUnikoCallRoutes(app, upload, deps) {
       console.error('[uniko-call] aviso-audio falhou:', e.message);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // Admin: refaz a transcrição de uma chamada já gravada (botão "Transcrever novamente" do Uniko Call).
+  app.post('/api/uniko-call/retranscribe/:id', deps?.requireAdmin || ((req, res) => res.sendStatus(503)), async (req, res) => {
+    if (!supabaseCall) return res.status(503).json({ error: 'Supabase do Uniko Call não configurado' });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'id inválido' });
+    if (retranscribing.has(id)) return res.status(409).json({ error: 'Essa chamada já está sendo transcrita.' });
+    const { data: row, error } = await supabaseCall.from('uniko_call_recordings').select('id, audio_url').eq('id', id).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!row) return res.status(404).json({ error: 'Chamada não encontrada.' });
+    if (!row.audio_url) return res.status(400).json({ error: 'Essa chamada não tem áudio guardado (foi apagada ou não houve consentimento).' });
+    retranscribing.add(id);
+    await supabaseCall.from('uniko_call_recordings').update({ status: 'processing', error: null }).eq('id', id);
+    res.json({ ok: true });
+    retranscribe(id); // segue em segundo plano; a tela atualiza sozinha (polling)
   });
 
   // upload = instância multer (memoryStorage) já criada em index.js — reaproveita.
