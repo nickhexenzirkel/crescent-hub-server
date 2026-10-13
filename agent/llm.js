@@ -256,6 +256,13 @@ function makeProvider(env = process.env, escolha = null) {
     if (!env.GROQ_API_KEY) return null;
     return groqProvider({ apiKey: env.GROQ_API_KEY, model: env.AGENT_MODEL || null });
   }
+  const { PROVEDORES } = require('./llm-compat');
+  if (PROVEDORES[which]) {
+    const def = PROVEDORES[which];
+    if (!env[def.chave]) return null;
+    const { compatProvider } = require('./llm-compat');
+    return compatProvider(which, { apiKey: env[def.chave], model: env['AGENT_' + which.toUpperCase() + '_MODEL'] || null });
+  }
   if (which === 'openai') {
     if (!env.OPENAI_API_KEY) return null;
     const { openaiProvider } = require('./llm-openai');

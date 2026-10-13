@@ -15,6 +15,7 @@
 //   AGENT_MODEL       (opcional) padrão llama-3.3-70b-versatile
 const path = require('path');
 const { makeProvider } = require('./llm');
+const provedores = require('./provedores');
 const { makeGithub } = require('./github');
 const { runPedido, undoMerge, scrub } = require('./runner');
 const acoes = require('./acoes');
@@ -23,9 +24,13 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   const TABLE = 'uniko_pedidos_ajuste';
   // Dois agentes: Groq (grátis) e OpenAI (pago). Cada pedido escolhe o seu (coluna "agente");
   // sem escolha, vale AGENT_PROVIDER (padrão groq). Provedores são criados na hora, por execução.
-  const temChave = { groq: !!process.env.GROQ_API_KEY, openai: !!process.env.OPENAI_API_KEY };
+  const temChave = provedores.temChave(process.env);
+  const algumaChave = () => Object.values(temChave).some(Boolean);
+  // Troca AUTOMÁTICA: se o agente escolhido falhar por motivo técnico (limite, formato, rodadas), tenta estes em ordem.
+  // Ex.: AGENT_FALLBACK=gemini,cerebras  (vazio = desligado; o dono troca na mão pelo seletor da aba).
+  const fallbacks = String(process.env.AGENT_FALLBACK || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const padrao = (process.env.AGENT_PROVIDER || 'groq').toLowerCase();
-  const escolherProvedor = (p) => { const q = String(p?.agente || padrao).toLowerCase(); return temChave[q] ? q : (temChave[padrao] ? padrao : (temChave.groq ? 'groq' : (temChave.openai ? 'openai' : q))); };
+  const escolherProvedor = (p) => { const q = String(p?.agente || padrao).toLowerCase(); return temChave[q] ? q : (temChave[padrao] ? padrao : (provedores.configurados(process.env)[0]?.id || q)); };
   const llm = makeProvider(process.env, padrao);   // só pra mostrar o modelo padrão na tela
   const github = process.env.GITHUB_TOKEN && process.env.AGENT_REPO ? makeGithub({ token: process.env.GITHUB_TOKEN, repo: process.env.AGENT_REPO }) : null;
   const workdir = process.env.AGENT_WORKDIR || path.join(__dirname, '..', 'agent-workspace', 'repo');
@@ -40,16 +45,26 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
     if (error) throw new Error(error.message);
     return data;
   };
-  const notReady = () => (!temChave.groq && !temChave.openai ? 'Falta GROQ_API_KEY (ou OPENAI_API_KEY) no servidor.' : !github ? 'Falta GITHUB_TOKEN / AGENT_REPO no servidor.' : null);
+  const notReady = () => (!algumaChave() ? 'Falta a chave de algum agente no servidor (GROQ_API_KEY, GEMINI_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY ou OPENAI_API_KEY).' : !github ? 'Falta GITHUB_TOKEN / AGENT_REPO no servidor.' : null);
 
   async function start(pedido) {
     if (busy) return { started: false, reason: `O agente já está trabalhando no pedido #${busy}.` };
     const nr = notReady(); if (nr) return { started: false, reason: nr };
     busy = pedido.id;
     const qual = escolherProvedor(pedido);
-    const llmDoPedido = makeProvider(process.env, qual);
-    if (!llmDoPedido) { busy = null; return { started: false, reason: `Falta a chave do agente "${qual}" no servidor.` }; }
-    runPedido(pedido, { llm: llmDoPedido, github, workdir, setStatus, supabase, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
+    if (!makeProvider(process.env, qual)) { busy = null; return { started: false, reason: `Falta a chave do agente "${qual}" no servidor.` }; }
+    // Primeiro o agente escolhido; se falhar por motivo técnico, os de AGENT_FALLBACK (cada um continua o passo a passo).
+    const fila = [qual, ...fallbacks.filter(f => f !== qual && temChave[f])];
+    (async () => {
+      let logAnterior = null;
+      for (let i = 0; i < fila.length; i++) {
+        const r = await runPedido(pedido, { llm: makeProvider(process.env, fila[i]), github, workdir, setStatus, supabase, logAnterior, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' });
+        if (r && r.ok) return;
+        if (!r || !r.tecnico || i === fila.length - 1) return;      // dúvida, sem alterações ou último da fila: para aqui
+        logAnterior = `${r.log || ''}\n[${new Date().toISOString().slice(11, 19)}] 🔁 O agente ${fila[i]} não conseguiu — passando para o ${fila[i + 1]}`;
+        await setStatus(pedido.id, { agente_log: logAnterior }).catch(() => {});
+      }
+    })()
       .catch(e => console.error('[agent] erro inesperado:', scrub(e.message)))
       .finally(() => { busy = null; });
     return { started: true };
@@ -57,7 +72,7 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
 
   app.get('/api/agent/config', requireAdmin, (req, res) => {
     res.json({ llm: temChave.groq || temChave.openai, github: !!github, auto: process.env.AGENT_AUTO === '1', busy, model: llm?.name || null, notReady: notReady(),
-      provedores: { groq: temChave.groq, openai: temChave.openai }, padrao });
+      provedores: provedores.detalhes(process.env), padrao, fallback: fallbacks });
   });
 
   app.post('/api/agent/run/:id', requireAdmin, async (req, res) => {

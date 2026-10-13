@@ -108,6 +108,8 @@ async function runPedido(pedido, deps) {
   const { llm, github, workdir, setStatus } = deps;
   const buildCmd = deps.buildCmd || 'npx vite build';
   const lines = [];
+  // Quando um agente anterior já tentou este pedido (troca automática), o passo a passo continua de onde parou.
+  if (deps.logAnterior) lines.push(...String(deps.logAnterior).split('\n'));
   let lastPush = 0;
   const flushLog = () => lines.join('\n').slice(-6000);
   // Cada linha do log vai pro banco quase em tempo real (a aba Pedidos de Ajuste mostra ao vivo).
@@ -135,7 +137,7 @@ async function runPedido(pedido, deps) {
   };
   const branch = `ia/pedido-${pedido.id}-${Date.now().toString(36)}`;
 
-  await setStatus(pedido.id, { status: 'em_andamento', agente_log: null, nota_ia: null });
+  await setStatus(pedido.id, deps.logAnterior ? { status: 'em_andamento', nota_ia: null } : { status: 'em_andamento', agente_log: null, nota_ia: null });
   try {
     await prepareWorkspace({ root: workdir, github, branch, skipInstall: deps.skipInstall, log });
     const tools = makeTools(workdir);
@@ -358,7 +360,7 @@ async function runPedido(pedido, deps) {
   } catch (e) {
     log(`💥 Falhou: ${um(scrub(e.message), 200)}`, true);
     await setStatus(pedido.id, { status: 'falhou', nota_ia: scrub(e.message).slice(0, 600), agente_log: flushLog() }).catch(() => {});
-    return { ok: false, reason: e.message };
+    return { ok: false, reason: e.message, tecnico: true, log: flushLog() };
   }
 }
 
