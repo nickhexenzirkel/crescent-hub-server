@@ -3925,6 +3925,9 @@ require('./unikoSecurityBackup')(app, { requireAdmin });
 // Supabase, importar de volta. Ver unikoArchive.js.
 require('./unikoArchive')(app, { requireAdmin });
 
+// Aba "Armazenamento" do Dashboard RH: tamanho do banco/Storage dos 2 projetos Supabase.
+require('./storageReport')(app, { requireAdmin, supabase });
+
 // ═══════════════════════════════════════════════════════
 // UNIKO CALL — recebe o áudio de chamada do WhatsApp Web gravado pela
 // extensão Cat-Bot, transcreve (Groq Whisper) e grava como "conversa".
