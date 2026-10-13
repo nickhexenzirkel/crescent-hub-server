@@ -60,7 +60,7 @@ function makeTools(root) {
       const { rel, abs } = G.resolveSafe(root, p);
       G.assertWritable(rel);
       G.assertContent(new_string);
-      if (!old_string) throw new Error('old_string vazio');
+      if (!old_string) throw new Error('old_string vazio — para ACRESCENTAR código novo num arquivo existente use uma operação por linha (op:"insert_after" ou "insert_before", com start = número da linha e expect); para criar um arquivo novo use create:true com content');
       const raw = fs.readFileSync(abs, 'utf8');
       const eol = eolOf(raw);
       const text = raw.replace(/\r\n/g, '\n');
@@ -79,7 +79,7 @@ function makeTools(root) {
       const { rel, abs } = G.resolveSafe(root, p);
       G.assertWritable(rel);
       G.assertContent(content);
-      if (fs.existsSync(abs)) throw new Error('arquivo já existe — use replace_in_file');
+      if (fs.existsSync(abs)) throw new Error('esse arquivo JÁ EXISTE — não recrie: escolha outro nome para o arquivo novo, ou altere o existente com operações por linha');
       if (Buffer.byteLength(content) > G.MAX_FILE_BYTES) throw new Error('arquivo grande demais');
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, content);

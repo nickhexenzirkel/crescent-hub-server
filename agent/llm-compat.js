@@ -76,8 +76,8 @@ function compatProvider(nome, { apiKey, model: querido }) {
     },
     async chat({ messages, tools, plain = false }) {
       await resolve();
-      let ultimoErro = '';
-      for (let tentativa = 0; tentativa < 4; tentativa++) {
+      let ultimoErro = '', soSobrecarga = true;
+      for (let tentativa = 0; tentativa < 5; tentativa++) {
         try {
           const body = { model, messages, temperature: 0.1, max_tokens: 2500 };
           if (!plain && tools?.length) { body.tools = tools.map(t => ({ type: 'function', function: t })); body.tool_choice = 'auto'; }
@@ -106,6 +106,8 @@ function compatProvider(nome, { apiKey, model: querido }) {
             excluidos.add(model); const outro = pickCompat(def, ids, null, excluidos);
             if (outro) { model = outro; continue; }
           }
+          if (status !== undefined && status < 500) soSobrecarga = false;
+          if (status >= 500) { await sleep(12000 * (tentativa + 1)); continue; }   // sobrecarga temporária do provedor
           if (status === 429 || status >= 500) {
             const ra = Number(e.response?.headers?.['retry-after']) || (parseFloat((/retry in ([\d.]+)s/i.exec(String(msg)) || [])[1]) || 0);
             await sleep((Number.isFinite(ra) && ra > 0 ? Math.min(ra, 60) : 6 * (tentativa + 1)) * 1000 + 300);
@@ -114,7 +116,9 @@ function compatProvider(nome, { apiKey, model: querido }) {
           throw new Error(`${nome} (${model}): ${String(msg).slice(0, 300)}`);
         }
       }
-      throw new Error(`${nome}: limite de uso do plano grátis atingido (tentei 4 vezes). Resposta do provedor: ${ultimoErro || 'sem detalhes'}. Tente outro agente ou aguarde um pouco.`);
+      throw new Error(soSobrecarga && /^5/.test(ultimoErro)
+        ? `${nome}: o provedor está sobrecarregado no momento (${ultimoErro}). Não é o seu limite — tente de novo em alguns minutos ou use outro agente.`
+        : `${nome}: limite de uso do plano grátis atingido (tentei 5 vezes). Resposta do provedor: ${ultimoErro || 'sem detalhes'}. Tente outro agente ou aguarde um pouco.`);
     },
   };
 }

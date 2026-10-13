@@ -34,7 +34,7 @@ const shell = (cmdline, cwd, timeout) => new Promise((resolve) => {
 const readIf = (p, max) => { try { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n').slice(0, max); } catch { return ''; } };
 
 // Notas do vault mais relacionadas ao pedido (pontuação simples por palavras).
-function relevantNotes(root, pedido, n = 2) {
+function relevantNotes(root, pedido, n = 2, maxChars = 700) {
   const dir = path.join(root, 'vault', 'Sistema');
   let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.md')); } catch { return []; }
   const words = `${pedido.titulo} ${pedido.descricao || ''} ${pedido.area || ''}`.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').match(/[a-z0-9]{4,}/g) || [];
@@ -45,7 +45,7 @@ function relevantNotes(root, pedido, n = 2) {
     const score = uniq.reduce((s, w) => s + (hay.includes(w) ? (f.includes(w) ? 3 : 1) : 0), 0);
     return { f, score, txt };
   }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, n)
-    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, 700)}`);
+    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, maxChars)}`);
 }
 
 function systemPrompt(root, pedido) {
@@ -184,6 +184,7 @@ async function runPedido(pedido, deps) {
       const ctx = await buildContext(workdir, pedido);
       log(`🧭 Contexto montado sem gastar o modelo — arquivos prováveis: ${ctx.files.length ? ctx.files.join(', ') : 'nenhum óbvio'}`, true);
       const sistema = planSystem(workdir);
+      const notasTxt = relevantNotes(workdir, pedido, 2, 1900).join('\n\n');   // ex.: "nova-aba-portal" quando o pedido é criar uma aba/jogo
       let extra = '', feedback = '', badJson = 0;
       const servidos = new Set();   // buscas/leituras já entregues (não repetir)
       const aplicados = [];
@@ -196,7 +197,7 @@ async function runPedido(pedido, deps) {
       };
       for (let round = 1; round <= MAX_PLAN_ROUNDS; round++) {
         log(`💬 Consultando o modelo (rodada ${round} de ${MAX_PLAN_ROUNDS})…`, true);
-        const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados) }], tools: [], plain: true });
+        const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados, notasTxt) }], tools: [], plain: true });
         const o = firstJsonObject(reply.content, x => x && (Array.isArray(x.edits) || x.need || x.give_up));
         if (!o) {
           badJson++;
@@ -377,4 +378,4 @@ async function undoMerge({ workdir, github, sha }) {
   await sh('git', ['push', 'origin', 'HEAD:refs/heads/main'], workdir, 180000);
 }
 
-module.exports = { runPedido, undoMerge, scrub };
+module.exports = { runPedido, undoMerge, scrub, relevantNotes };

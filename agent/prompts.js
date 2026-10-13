@@ -21,7 +21,7 @@ Responda SOMENTE com UM objeto JSON (sem texto fora dele, sem cercas de código)
    Arquivo novo: {"path":"src/...","create":true,"content":"..."}.
 2) Precisa ver mais código: {"need":{"search":["texto"],"read":[{"path":"src/...","start":1,"end":80}]}}
 3) Não dá, é grande demais ou perigoso: {"give_up":"motivo curto"}
-Ao MOVER um item de uma lista/array, "to" deve ser a linha de OUTRO item da mesma lista (o item vai ficar logo acima dele) — nunca a linha que abre a lista (ex.: "const X = [") nem a que a fecha. Confira os números olhando as linhas mostradas. Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Mantenha a resposta CURTA. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
+Ao MOVER um item de uma lista/array, "to" deve ser a linha de OUTRO item da mesma lista (o item vai ficar logo acima dele) — nunca a linha que abre a lista (ex.: "const X = [") nem a que a fecha. Confira os números olhando as linhas mostradas. Para CRIAR algo novo (tela, aba, jogo): crie o componente com create:true em um arquivo NOVO e registre-o nos arquivos existentes com operações por linha (insert_after) — nunca use old_string vazio. Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Mantenha a resposta CURTA. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
 
 # Regras do projeto
 ${regras}
@@ -29,10 +29,11 @@ ${regras}
 ${conv}`;
 }
 
-function planUser(pedidoTexto, ctx, extra, feedback, aplicados) {
+function planUser(pedidoTexto, ctx, extra, feedback, aplicados, notas) {
   const partes = [pedidoTexto];
   partes.push('# Código encontrado (o número e o TAB no começo de cada linha são só referência — NÃO fazem parte do código)');
   partes.push(ctx.snippets || '(nenhum trecho óbvio encontrado — use "need" com search)');
+  if (notas) partes.push(`# Notas do cofre relacionadas ao pedido (siga as instruções delas)\n${notas}`);
   if (extra) partes.push(`# Informação extra que você pediu\n${extra.slice(-3500)}`);
   if (aplicados.length) partes.push(`# Já aplicado nesta tentativa: ${[...new Set(aplicados)].join(', ')}`);
   if (feedback) partes.push(`# ATENÇÃO\n${feedback}`);
