@@ -151,6 +151,13 @@ async function runPedido(pedido, deps) {
       const sistema = planSystem(workdir);
       let extra = '', feedback = '', badJson = 0;
       const aplicados = [];
+      // Desfaz TODAS as edições já aplicadas: os números de linha mostrados no contexto voltam a valer
+      // (sem isso, depois de uma edição os números mudam e o modelo erra o alvo na rodada seguinte).
+      const desfazerTudo = async () => {
+        await sh('git', ['checkout', '--', '.'], workdir).catch(() => {});
+        await sh('git', ['clean', '-fd', '--', 'src', 'vault'], workdir).catch(() => {});
+        tools.changed.clear(); aplicados.length = 0;
+      };
       for (let round = 1; round <= MAX_PLAN_ROUNDS; round++) {
         log(`💬 Consultando o modelo (rodada ${round} de ${MAX_PLAN_ROUNDS})…`, true);
         const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados) }], tools: [], plain: true });
@@ -201,14 +208,21 @@ async function runPedido(pedido, deps) {
             log(descreve(e.create ? 'create_file' : 'replace_in_file', e), true);
           } catch (err) { erros.push(`${e.path}: ${err.message}`); log(`⚠️ ${e.path} não deu: ${um(err.message, 160)}`); }
         }
-        if (erros.length) { feedback = `Estas edições FALHARAM (as demais já foram aplicadas — não repita): ${erros.join(' | ')}. Se o trecho não bate, peça a leitura exata com "need", ou envie a edição corrigida.`; continue; }
+        if (erros.length) {
+          await desfazerTudo();
+          log('↩️ Houve erro em alguma edição — desfiz todas pra recomeçar com os números de linha originais', true);
+          feedback = `Estas edições FALHARAM: ${erros.join(' | ')}. TODAS as suas edições desta resposta foram DESFEITAS (nada foi alterado), então os números de linha são os do código mostrado. Envie de novo o conjunto COMPLETO de edições, corrigido (ou use "need" para ver mais código).`;
+          continue;
+        }
         if (!tools.changed.size) { feedback = 'Nenhuma edição foi aplicada. Envie "edits" com old_string e new_string, ou "give_up".'; continue; }
         log('🔨 Conferindo se o site continua montando (build)…', true);
         const b = await shell(buildCmd, workdir, 300000);
         if (b.ok) { log('✅ Build passou — o site monta normalmente', true); return o.summary || 'Ajuste feito.'; }
         if (++buildRetries > MAX_BUILD_RETRIES) throw new Error(`o build falhou mesmo após ${MAX_BUILD_RETRIES} correções:\n${b.out.slice(-500)}`);
         log(`❌ O build falhou — mostrando o erro ao modelo pra corrigir (tentativa ${buildRetries})`, true);
-        feedback = `O BUILD FALHOU depois das suas edições (já aplicadas). Corrija com novas edições. Erro:\n${b.out.slice(-1200)}`;
+        await desfazerTudo();
+        log('↩️ Desfiz as edições (o build quebrou) para tentar de novo com os números de linha originais', true);
+        feedback = `O BUILD FALHOU com as suas edições, então elas foram DESFEITAS (o código voltou ao original e os números de linha são os do código mostrado). Provável causa: um número de linha errado deixou a sintaxe quebrada (ex.: "to" caiu numa linha que abre ou fecha a lista, e não entre os itens dela). Envie o conjunto COMPLETO corrigido. Erro do build:\n${b.out.slice(-1000)}`;
       }
       throw new Error(`não consegui concluir em ${MAX_PLAN_ROUNDS} rodadas`);
     };

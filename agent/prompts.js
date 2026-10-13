@@ -21,7 +21,7 @@ Responda SOMENTE com UM objeto JSON (sem texto fora dele, sem cercas de código)
    Arquivo novo: {"path":"src/...","create":true,"content":"..."}.
 2) Precisa ver mais código: {"need":{"search":["texto"],"read":[{"path":"src/...","start":1,"end":80}]}}
 3) Não dá, é grande demais ou perigoso: {"give_up":"motivo curto"}
-Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Mantenha a resposta CURTA. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
+Ao MOVER um item de uma lista/array, "to" deve ser a linha de OUTRO item da mesma lista (o item vai ficar logo acima dele) — nunca a linha que abre a lista (ex.: "const X = [") nem a que a fecha. Confira os números olhando as linhas mostradas. Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Mantenha a resposta CURTA. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
 
 # Regras do projeto
 ${regras}
