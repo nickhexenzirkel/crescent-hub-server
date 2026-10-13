@@ -12,7 +12,7 @@ const { firstJsonObject } = require('./llm');
 const norm = (s) => String(s || '').normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
 const palavras = (s) => norm(s).match(/[a-z0-9]{2,}/g) || [];
 const STOP = new Set(['de', 'do', 'da', 'em', 'no', 'na', 'as', 'os', 'um', 'ao', 'uniko', 'unikos', 'para', 'todos', 'todas', 'tirar', 'remover', 'esconder', 'ocultar', 'trocar', 'nome', 'mudar', 'modulo', 'aba', 'tab', 'sidebar', 'portal', 'dashboard', 'colaborador', 'pessoa', 'quero', 'pedidos', 'ajuste', 'meu', 'minha', 'dos', 'das', 'que', 'com', 'uma', 'por', 'ficar', 'fique', 'seja', 'tudo']);
-const PROTEGIDOS = new Set(['modulo:colaborador', 'modulo:dashboard', 'aba:inicio']);   // espelha shared/visibilidade.js
+const PROTEGIDOS = new Set(['modulo:colaborador', 'modulo:dashboard', 'aba:inicio', 'rh_aba:pedidos_ajuste', 'rh_aba:modulos_abas', 'rh_aba:permissoes']);   // espelha shared/visibilidade.js
 const TABELA_VIS = 'uniko_visibilidade';
 
 const lerArquivo = (root, rel) => { try { return fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n'); } catch { return ''; } };
@@ -30,8 +30,19 @@ function catalogoItens(root) {
     const m = /^\s*\{id:\s*'([^']+)',\s*label:\s*'([^']+)'/.exec(l);
     if (m) itens.push({ tipo: 'aba', id: m[1], label: m[2] });
   }
+  // Abas do menu lateral do Dashboard RH (lista TABS do dashboard-rh/index.jsx).
+  const rh = lerArquivo(root, 'src/modules/dashboard-rh/index.jsx');
+  const ini = rh.indexOf('const TABS=[');
+  if (ini > 0) {
+    const fim = rh.indexOf('\n  ];', ini);
+    for (const l of rh.slice(ini, fim > 0 ? fim : ini + 40000).split('\n')) {
+      const m = /^\s*\{id:\s*'([^']+)',\s*label:\s*'([^']+)'/.exec(l);
+      if (m) itens.push({ tipo: 'rh_aba', id: m[1], label: m[2] });
+    }
+  }
   return itens;
 }
+const rotuloTipo = (t) => (t === 'rh_aba' ? 'a aba do Dashboard RH' : t === 'aba' ? 'a aba do Portal' : 'o módulo');
 function catalogoUnikos(root) {
   const out = [];
   const t = lerArquivo(root, 'src/shared/captureUniko.js');
@@ -72,14 +83,16 @@ function promptTriagem(pedido, c) {
   const l = (arr, f) => (arr.length ? arr.map(f).join('\n') : '(nenhum)');
   return `Você classifica pedidos de ajuste do sistema Uniko. Responda SOMENTE com UM objeto JSON (sem texto fora dele).
 Se o pedido é uma AÇÃO ADMINISTRATIVA (dados/configuração, sem mexer em código), responda em um destes formatos:
-{"acao":"esconder","tipo":"modulo"|"aba","id":"<id>","para":"todos"}   ou   "para":["Nome completo exato", ...]
-{"acao":"mostrar","tipo":"modulo"|"aba","id":"<id>","para":"todos"|["Nome completo exato"]}   (desfaz um esconder)
-{"acao":"renomear","tipo":"modulo"|"aba","id":"<id>","nome":"Novo nome"}
+{"acao":"esconder","tipo":"modulo"|"aba"|"rh_aba","id":"<id>","para":"todos"}   ou   "para":["Nome completo exato", ...]
+{"acao":"mostrar","tipo":"modulo"|"aba"|"rh_aba","id":"<id>","para":"todos"|["Nome completo exato"]}   (desfaz um esconder)
+{"acao":"renomear","tipo":"modulo"|"aba"|"rh_aba","id":"<id>","nome":"Novo nome"}
 {"acao":"remover_uniko","uniko":"<id>","pessoa":"Nome completo exato"}   (tira da coleção de capturados da pessoa)
 Se NÃO for ação administrativa (é mudar visual, texto fixo, comportamento, posição): {"codigo":true}
 Se for ação mas está ambíguo ou falta algo (qual módulo? qual das pessoas?): {"duvida":"pergunta curta em português"}
+IMPORTANTE: o dono nem sempre usa o nome exato. Se existir UM item da lista com nome parecido ou que contém as palavras do pedido (ex.: "Ajuste Inteligente" ≈ "Pedidos de Ajuste"), USE esse item — só pergunte (duvida) se houver MAIS DE UM plausível ou NENHUM parecido, e cite as opções na pergunta.
 Regras: use APENAS ids e nomes das listas abaixo, escritos exatamente assim. "Tirar/remover um Uniko DE uma pessoa": se o Uniko está em "Unikos capturáveis" é remover_uniko; se é um módulo ou aba da lista, é esconder PARA aquela pessoa. "Todos"/"para todos" = "todos". Se mais de uma pessoa serve (ex.: dois "Nicolas") e o pedido não diz qual, responda duvida.
 
+Tipos: modulo = card da tela inicial; aba = aba do menu do Portal do Colaborador; rh_aba = aba do menu lateral do Dashboard RH.
 Módulos e abas:
 ${l(c.itens, i => `- ${i.tipo} id="${i.id}" nome="${i.label}"`)}
 Unikos capturáveis:
@@ -122,7 +135,7 @@ function validar(o, c) {
 
 const descreverPlano = (p) => {
   const quem = p.para === 'todos' ? 'para todos' : `para ${p.para?.join(', ')}`;
-  const rot = p.tipo === 'aba' ? 'a aba' : 'o módulo';
+  const rot = rotuloTipo(p.tipo);
   switch (p.acao) {
     case 'esconder': return `Esconder ${rot} "${p.label}" ${quem}`;
     case 'mostrar': return `Mostrar de novo ${rot} "${p.label}" ${quem}`;
@@ -158,7 +171,7 @@ async function executar(plano, { supabase, quem }) {
   const base = antes ? { ...antes } : { tipo: plano.tipo, item_id: plano.id, nome: null, oculto_todos: false, ocultar_para: [] };
   base.ocultar_para = Array.isArray(base.ocultar_para) ? [...base.ocultar_para] : [];
   base.updated_by = quem || 'Agente';
-  const rot = plano.tipo === 'aba' ? 'a aba' : 'o módulo';
+  const rot = rotuloTipo(plano.tipo);
   let resumo;
   if (plano.acao === 'esconder') {
     if (plano.para === 'todos') { base.oculto_todos = true; resumo = `Escondi ${rot} "${plano.label}" para todos.`; }
@@ -203,7 +216,10 @@ async function interpretar({ llm, root, pedido, supabase }) {
   const reply = await llm.chat({ messages: [{ role: 'user', content: promptTriagem(pedido, c) }], tools: [], plain: true });
   const o = firstJsonObject(reply.content, x => x && (x.acao || x.codigo || x.duvida));
   if (!o || o.codigo) return null;
-  if (o.duvida) return { duvida: String(o.duvida).slice(0, 300) };
+  if (o.duvida) {
+    const opcoes = [...c.itens.map(i => `${i.tipo === 'aba' ? 'aba' : 'módulo'} "${i.label}"`), ...c.unikos.map(u => `Uniko "${u.name}"`), ...c.pessoas].slice(0, 8);
+    return { duvida: `${String(o.duvida).slice(0, 260)}${opcoes.length ? ` (Encontrei: ${opcoes.join('; ')}.)` : ''}` };
+  }
   const v = validar(o, c);
   if (v.erro) return { erro: v.erro };
   return { plano: v.plano, descricao: descreverPlano(v.plano) };

@@ -12,7 +12,7 @@ const PROVEDORES = {
   gemini: {
     rotulo: 'Google Gemini — grátis', chave: 'GEMINI_API_KEY', base: 'https://generativelanguage.googleapis.com/v1beta/openai',
     limpar: (id) => id.replace(/^models\//, ''),
-    preferencia: [/^gemini-2\.5-flash$/, /^gemini-2\.5-pro$/, /^gemini-2\.0-flash$/, /^gemini-.*flash(?!.*(lite|image|thinking|tts|live|exp))/],
+    preferencia: [/^gemini-2\.5-flash$/, /^gemini-2\.0-flash$/, /^gemini-2\.5-pro$/, /^gemini-.*flash(?!.*(lite|image|thinking|tts|live|exp))/, /^gemini-2\.5-flash-lite$/, /^gemini-.*flash-lite$/],
     excluir: /embed|aqa|imagen|veo|tts|live|image|vision|learnlm|gemma/i,
   },
   cerebras: {
@@ -76,6 +76,7 @@ function compatProvider(nome, { apiKey, model: querido }) {
     },
     async chat({ messages, tools, plain = false }) {
       await resolve();
+      let ultimoErro = '';
       for (let tentativa = 0; tentativa < 4; tentativa++) {
         try {
           const body = { model, messages, temperature: 0.1, max_tokens: 2500 };
@@ -99,15 +100,21 @@ function compatProvider(nome, { apiKey, model: querido }) {
             if (!outro) throw new Error(`${nome}: o modelo ${model} não está disponível e não achei outro.`);
             model = outro; continue;
           }
+          ultimoErro = `${status || ''} ${String(msg).replace(/\s+/g, ' ').slice(0, 220)}`.trim();
+          // 429 com "limit: 0" = esse modelo NÃO tem cota grátis nessa conta: não adianta esperar, troca de modelo.
+          if (status === 429 && /limit:\s*0\b|not available in the free tier|no free quota/i.test(String(msg))) {
+            excluidos.add(model); const outro = pickCompat(def, ids, null, excluidos);
+            if (outro) { model = outro; continue; }
+          }
           if (status === 429 || status >= 500) {
-            const ra = Number(e.response?.headers?.['retry-after']);
+            const ra = Number(e.response?.headers?.['retry-after']) || (parseFloat((/retry in ([\d.]+)s/i.exec(String(msg)) || [])[1]) || 0);
             await sleep((Number.isFinite(ra) && ra > 0 ? Math.min(ra, 60) : 6 * (tentativa + 1)) * 1000 + 300);
             continue;
           }
           throw new Error(`${nome} (${model}): ${String(msg).slice(0, 300)}`);
         }
       }
-      throw new Error(`${nome}: limite de uso do plano grátis atingido (tentei 4 vezes). Tente outro agente ou aguarde um pouco.`);
+      throw new Error(`${nome}: limite de uso do plano grátis atingido (tentei 4 vezes). Resposta do provedor: ${ultimoErro || 'sem detalhes'}. Tente outro agente ou aguarde um pouco.`);
     },
   };
 }
