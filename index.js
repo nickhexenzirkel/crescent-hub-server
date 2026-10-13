@@ -3921,6 +3921,10 @@ require('./whatsappCloudApi')(app);
 // ═══════════════════════════════════════════════════════
 require('./unikoSecurityBackup')(app, { requireAdmin });
 
+// Arquivo anual (.ukarq) do Uniko WhatsApp + Uniko Call: baixar o ano, excluir do
+// Supabase, importar de volta. Ver unikoArchive.js.
+require('./unikoArchive')(app, { requireAdmin });
+
 // ═══════════════════════════════════════════════════════
 // UNIKO CALL — recebe o áudio de chamada do WhatsApp Web gravado pela
 // extensão Cat-Bot, transcreve (Groq Whisper) e grava como "conversa".
