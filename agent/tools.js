@@ -17,7 +17,7 @@ const DEFINITIONS = [
     parameters: { type: 'object', properties: { path: { type: 'string', description: 'ex.: src/shared' } }, required: ['path'] } },
   { name: 'search', description: 'Procura um texto (literal) nos arquivos de src/ e vault/. Devolve arquivo:linha:trecho. Use para achar onde algo está.',
     parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
-  { name: 'read_file', description: 'Lê um arquivo (com números de linha). Máximo 120 linhas por chamada: use start_line/end_line.',
+  { name: 'read_file', description: 'Lê um arquivo (com números de linha). Máximo 80 linhas por chamada: use start_line/end_line.',
     parameters: { type: 'object', properties: { path: { type: 'string' }, start_line: { type: 'integer' }, end_line: { type: 'integer' } }, required: ['path'] } },
   { name: 'replace_in_file', description: 'Troca um trecho EXATO do arquivo por outro. old_string precisa existir uma única vez (inclua linhas vizinhas para ficar único). Copie o texto exatamente como está, com a indentação.',
     parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } },
@@ -43,7 +43,7 @@ function makeTools(root) {
     async search({ text }) {
       if (!text || text.length < 2) throw new Error('texto muito curto');
       const out = await run('git', ['grep', '-n', '-I', '-F', '--max-count=3', '-e', text, '--', 'src', 'vault'], root);
-      const lines = out.split('\n').filter(Boolean).slice(0, 25).map(l => clip(l, 180));
+      const lines = out.split('\n').filter(Boolean).slice(0, 15).map(l => clip(l, 140));
       return lines.length ? lines.join('\n') : 'nenhum resultado';
     },
     async read_file({ path: p, start_line, end_line }) {
@@ -52,9 +52,9 @@ function makeTools(root) {
       const st = fs.statSync(abs);
       if (st.size > 4 * 1024 * 1024) throw new Error('arquivo grande demais para ler inteiro — use search e start_line/end_line');
       const lines = fs.readFileSync(abs, 'utf8').split(/\r?\n/);
-      const a = Math.max(1, start_line || 1), b = Math.min(lines.length, end_line || a + 119, a + 119);
+      const a = Math.max(1, start_line || 1), b = Math.min(lines.length, end_line || a + 79, a + 79);
       const body = lines.slice(a - 1, b).map((l, i) => `${a + i}\t${l}`).join('\n');
-      return clip(`[${rel}  linhas ${a}-${b} de ${lines.length}]\n${body}`, 7000);
+      return clip(`[${rel}  linhas ${a}-${b} de ${lines.length}]\n${body}`, 5000);
     },
     async replace_in_file({ path: p, old_string, new_string }) {
       const { rel, abs } = G.resolveSafe(root, p);

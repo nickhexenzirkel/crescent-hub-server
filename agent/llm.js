@@ -70,10 +70,49 @@ function parseJsonCall(text) {
   return null;
 }
 
+// ── Orçamento de tokens ──────────────────────────────────────────────────────
+// O plano gratuito limita tokens POR MINUTO (ex.: 8000) e conta entrada + o
+// máximo de saída pedido. Se uma única requisição passa do limite, a Groq
+// recusa de vez ("Request too large"). Então cortamos o histórico para caber:
+// mantém a instrução (system + pedido) e as rodadas mais recentes inteiras,
+// descarta as mais antigas. ~3 caracteres por token (conservador pra código/pt-BR).
+const CHARS_POR_TOKEN = 3;
+const msgChars = (m) => (m.content ? String(m.content).length : 0) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
+function trimToBudget(messages, budgetChars) {
+  const total = messages.reduce((a, m) => a + msgChars(m), 0);
+  if (total <= budgetChars) return messages;
+  const head = messages.slice(0, 2);               // system + pedido
+  const rest = messages.slice(2);
+  // agrupa em rodadas: assistant(+tool_calls) com suas respostas de ferramenta
+  const grupos = [];
+  for (const m of rest) {
+    if (m.role === 'tool' && grupos.length) grupos[grupos.length - 1].push(m);
+    else grupos.push([m]);
+  }
+  let usado = head.reduce((a, m) => a + msgChars(m), 0);
+  const mantidos = [];
+  for (let i = grupos.length - 1; i >= 0; i--) {
+    let g = grupos[i];
+    let c = g.reduce((a, m) => a + msgChars(m), 0);
+    if (usado + c > budgetChars) {
+      if (mantidos.length === 0) {                  // a rodada mais nova sozinha é grande: encurta o resultado das ferramentas
+        const sobra = Math.max(600, budgetChars - usado - 400);
+        g = g.map(m => (m.role === 'tool' && m.content.length > sobra ? { ...m, content: m.content.slice(0, sobra) + '\n…(cortado)' } : m));
+        c = g.reduce((a, m) => a + msgChars(m), 0);
+      } else break;
+    }
+    mantidos.unshift(g); usado += c;
+  }
+  const out = [...head];
+  if (mantidos.length < grupos.length) out.push({ role: 'user', content: '(O histórico mais antigo foi omitido para economizar espaço. Continue a partir do que está abaixo.)' });
+  return [...out, ...mantidos.flat()];
+}
+
 function groqProvider({ apiKey, model: wanted }) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   let model = null, ids = [];
   let jsonMode = false;
+  let tpmLimit = 6000;   // limite de tokens/minuto assumido (aprende com o erro da Groq)
   const excluded = new Set();   // modelos que falharam repetidamente nesta execução
 
   async function resolve(force = false) {
@@ -105,11 +144,13 @@ function groqProvider({ apiKey, model: wanted }) {
     async chat({ messages, tools }) {
       await resolve();
       let reresolvido = false;
+      // Caracteres de histórico que cabem: (limite − saída pedida − ~700 das definições de ferramentas) × 3.
+      const budgetChars = (saida) => Math.max(5000, (tpmLimit - saida - 700) * CHARS_POR_TOKEN);
       for (let tentativa = 0; tentativa < 5; tentativa++) {
         try {
           if (jsonMode) {
             const r = await axios.post(`${BASE}/chat/completions`, {
-              model, messages: toJsonMessages(messages, tools), temperature: 0.2, max_tokens: 3000,
+              model, messages: toJsonMessages(trimToBudget(messages, budgetChars(2200)), tools), temperature: 0.2, max_tokens: 2200,
               ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : null),
             }, { headers, timeout: 120000 });
             const text = r.data?.choices?.[0]?.message?.content || '';
@@ -117,11 +158,11 @@ function groqProvider({ apiKey, model: wanted }) {
             return call ? { content: '', toolCalls: [call] } : { content: '', toolCalls: [], formatError: 'resposta sem JSON de ferramenta' };
           }
           const r = await axios.post(`${BASE}/chat/completions`, {
-            model, messages, temperature: 0.2, max_tokens: 2048,
+            model, messages: trimToBudget(messages, budgetChars(/gpt-oss/.test(model) ? 2600 : 1800)), temperature: 0.2, max_tokens: 1800,
             tools: tools.map(t => ({ type: 'function', function: t })), tool_choice: 'auto',
             // gpt-oss "pensa" antes de responder: esforço baixo (mais rápido) e mais espaço de saída,
             // senão a chamada de ferramenta é cortada no meio e vira "Parsing failed".
-            ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low', max_tokens: 4096 } : null),
+            ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low', max_tokens: 2600 } : null),
           }, { headers, timeout: 120000 });
           const m = r.data?.choices?.[0]?.message || {};
           const toolCalls = (m.tool_calls || []).map(tc => {
@@ -144,6 +185,11 @@ function groqProvider({ apiKey, model: wanted }) {
             continue;
           }
           // Limite de tokens/minuto do plano gratuito: espera o que a API mandar e tenta de novo.
+          const mGrande = /Limit (\d+), Requested (\d+)/.exec(msg);
+          if (mGrande && /too large|reduce your message/i.test(msg) && tentativa < 3) {
+            tpmLimit = Math.max(2500, Math.min(tpmLimit, Number(mGrande[1])) - 800 * (tentativa + 1));   // aprende o limite real e aperta mais a cada tentativa
+            continue;
+          }
           if (status === 429 || status >= 500) {
             const ra = Number(e.response?.headers?.['retry-after']);
             await sleep((Number.isFinite(ra) && ra > 0 ? ra : 8 * (tentativa + 1)) * 1000 + 500);

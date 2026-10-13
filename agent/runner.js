@@ -29,7 +29,7 @@ const shell = (cmdline, cwd, timeout) => new Promise((resolve) => {
 const readIf = (p, max) => { try { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n').slice(0, max); } catch { return ''; } };
 
 // Notas do vault mais relacionadas ao pedido (pontuação simples por palavras).
-function relevantNotes(root, pedido, n = 3) {
+function relevantNotes(root, pedido, n = 2) {
   const dir = path.join(root, 'vault', 'Sistema');
   let files = []; try { files = fs.readdirSync(dir).filter(f => f.endsWith('.md')); } catch { return []; }
   const words = `${pedido.titulo} ${pedido.descricao || ''} ${pedido.area || ''}`.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').match(/[a-z0-9]{4,}/g) || [];
@@ -40,7 +40,7 @@ function relevantNotes(root, pedido, n = 3) {
     const score = uniq.reduce((s, w) => s + (hay.includes(w) ? (f.includes(w) ? 3 : 1) : 0), 0);
     return { f, score, txt };
   }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, n)
-    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, 900)}`);
+    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, 700)}`);
 }
 
 function systemPrompt(root, pedido) {
