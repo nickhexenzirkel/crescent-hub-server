@@ -28,6 +28,7 @@ function pickModel(ids, wanted) {
 function groqProvider({ apiKey, model: wanted }) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   let model = null, ids = [];
+  const excluded = new Set();   // modelos que falharam repetidamente nesta execução
 
   async function resolve(force = false) {
     if (model && !force) return model;
@@ -35,7 +36,7 @@ function groqProvider({ apiKey, model: wanted }) {
       throw new Error(`Groq: não consegui listar os modelos (${e.response?.data?.error?.message || e.message}). Confira a GROQ_API_KEY.`);
     });
     ids = (r.data?.data || []).map(m => m.id);
-    const escolhido = pickModel(ids, wanted);
+    const escolhido = pickModel(ids.filter(id => !excluded.has(id)), wanted);
     if (!escolhido) throw new Error('Groq: sua conta não tem nenhum modelo de chat disponível.');
     model = escolhido;
     return model;
@@ -44,6 +45,15 @@ function groqProvider({ apiKey, model: wanted }) {
   return {
     get name() { return `groq:${model || wanted || 'auto'}`; },
     ready: () => resolve(),
+    // Troca por outro modelo da lista (usado quando o atual erra o formato das ferramentas repetidamente).
+    async switchModel() {
+      await resolve();
+      excluded.add(model);
+      const outro = pickModel(ids.filter(id => !excluded.has(id)), null);
+      if (!outro) return null;
+      model = outro; wanted = null;
+      return model;
+    },
     async chat({ messages, tools }) {
       await resolve();
       let reresolvido = false;
@@ -52,7 +62,10 @@ function groqProvider({ apiKey, model: wanted }) {
           const r = await axios.post(`${BASE}/chat/completions`, {
             model, messages, temperature: 0.2, max_tokens: 2048,
             tools: tools.map(t => ({ type: 'function', function: t })), tool_choice: 'auto',
-          }, { headers, timeout: 90000 });
+            // gpt-oss "pensa" antes de responder: esforço baixo (mais rápido) e mais espaço de saída,
+            // senão a chamada de ferramenta é cortada no meio e vira "Parsing failed".
+            ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low', max_tokens: 4096 } : null),
+          }, { headers, timeout: 120000 });
           const m = r.data?.choices?.[0]?.message || {};
           const toolCalls = (m.tool_calls || []).map(tc => {
             let args = {};
@@ -80,7 +93,7 @@ function groqProvider({ apiKey, model: wanted }) {
             continue;
           }
           // Modelo errou o formato da chamada de ferramenta: devolve como erro recuperável.
-          if (status === 400 && /tool|function/i.test(JSON.stringify(e.response?.data || ''))) {
+          if (status === 400 && /(parsing failed|failed_generation|tool_use_failed|tool call|function)/i.test(JSON.stringify(e.response?.data || ''))) {
             return { content: '', toolCalls: [], formatError: msg || 'formato de ferramenta inválido' };
           }
           throw new Error(`Groq (${model}): ${msg}`);

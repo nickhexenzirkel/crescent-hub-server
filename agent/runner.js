@@ -143,7 +143,14 @@ async function runPedido(pedido, deps) {
       compact(messages);
       const reply = await llm.chat({ messages, tools: DEFINITIONS });
       if (reply.formatError) {
-        if (++formatErrors > 3) throw new Error('o modelo não conseguiu usar as ferramentas direito (formato inválido)');
+        formatErrors++;
+        log(`⚠️ O modelo errou o formato de uma ação (${formatErrors}ª vez) — tentando de novo`);
+        // 2 erros seguidos: troca de modelo (outro da conta) em vez de insistir no mesmo.
+        if (formatErrors % 2 === 0 && llm.switchModel) {
+          const novo = await llm.switchModel();
+          if (novo) log(`🔄 Trocando de modelo para ${novo}`, true);
+        }
+        if (formatErrors > 8) throw new Error('os modelos não conseguiram usar as ferramentas direito (formato inválido)');
         messages.push({ role: 'user', content: 'Sua última chamada de ferramenta veio com formato inválido. Tente de novo, com argumentos em JSON válido.' });
         continue;
       }
