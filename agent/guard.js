@@ -8,7 +8,7 @@ const WRITE_ROOTS = ['src/modules/', 'src/shared/', 'src/components/', 'src/hook
 // Mesmo dentro das pastas acima, estes caminhos são proibidos.
 const WRITE_DENY = [
   /(^|\/)(ponto|contracheque|desligamento|colaborador-info|prestacao)/i,   // RH / dados pessoais
-  /(^|\/)dashboard-rh\//i,                                                  // painel do RH inteiro
+  /(^|\/)dashboard-rh\/(contracheque|Gerenciar)/i,                          // pagamento e permissões do RH (o resto do painel — ordem das abas, visual — pode)
   /permiss|cargo|auth|login|senha|password|token|secret|jwt|credencia/i,    // segurança
   /(^|\/)uniko-(security|call|safer)\//i,                                   // conversas e ligações gravadas
 ];

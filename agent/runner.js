@@ -77,7 +77,7 @@ function compact(messages) {
 async function prepareWorkspace({ root, github, branch, skipInstall, log }) {
   if (!fs.existsSync(path.join(root, '.git'))) {
     fs.mkdirSync(path.dirname(root), { recursive: true });
-    log('clonando o repositório (1ª vez)…');
+    log('📥 Clonando o repositório (1ª vez, demora)…');
     await sh('git', ['clone', github.cloneUrl, root], path.dirname(root), 600000);
   } else {
     await sh('git', ['remote', 'set-url', 'origin', github.cloneUrl], root);
@@ -90,7 +90,7 @@ async function prepareWorkspace({ root, github, branch, skipInstall, log }) {
   const hash = crypto.createHash('sha1').update(readIf(lockFile, 50 * 1024 * 1024)).digest('hex');
   const stamp = path.join(root, 'node_modules', '.agent-lock-hash');
   if (!fs.existsSync(path.join(root, 'node_modules')) || readIf(stamp, 100) !== hash) {
-    log('instalando dependências (pode demorar)…');
+    log('📦 Instalando dependências (pode demorar)…');
     await sh('npm', ['ci', '--no-audit', '--no-fund'], root, 900000);
     fs.writeFileSync(stamp, hash);
   }
@@ -103,8 +103,31 @@ async function runPedido(pedido, deps) {
   const { llm, github, workdir, setStatus } = deps;
   const buildCmd = deps.buildCmd || 'npx vite build';
   const lines = [];
-  const log = (m) => { const l = `[${new Date().toISOString().slice(11, 19)}] ${m}`; lines.push(l); (deps.log || console.log)(`[agent #${pedido.id}] ${m}`); };
+  let lastPush = 0;
   const flushLog = () => lines.join('\n').slice(-6000);
+  // Cada linha do log vai pro banco quase em tempo real (a aba Pedidos de Ajuste mostra ao vivo).
+  const log = (m, force = false) => {
+    const l = `[${new Date().toISOString().slice(11, 19)}] ${m}`;
+    lines.push(l); (deps.log || console.log)(`[agent #${pedido.id}] ${m}`);
+    if (force || Date.now() - lastPush > 1500) { lastPush = Date.now(); Promise.resolve(setStatus(pedido.id, { agente_log: flushLog() })).catch(() => {}); }
+  };
+  const um = (t, n = 90) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  // Descreve em português o que a ferramenta está fazendo (é o que o dono lê na tela).
+  const descreve = (name, a, out) => {
+    switch (name) {
+      case 'list_dir': return `📁 Olhando a pasta ${a.path}`;
+      case 'search': {
+        const achou = out !== 'nenhum resultado';
+        const n = String(out).split('\n').filter(Boolean).length;
+        return `🔎 Procurando "${um(a.text, 50)}" — ${achou ? `${n} resultado(s), ex.: ${um(String(out).split('\n')[0], 70)}` : 'nada encontrado'}`;
+      }
+      case 'read_file': return `📖 Lendo ${a.path}${a.start_line ? ` (linhas ${a.start_line}–${a.end_line || a.start_line + 199})` : ''}`;
+      case 'replace_in_file': return `✏️ EDITANDO ${a.path}\n     antes:  ${um(a.old_string)}\n     depois: ${um(a.new_string)}`;
+      case 'create_file': return `🆕 CRIANDO ${a.path}`;
+      case 'finish': return `🏁 Terminou: ${um(a.summary, 120)}`;
+      default: return name;
+    }
+  };
   const branch = `ia/pedido-${pedido.id}-${Date.now().toString(36)}`;
 
   await setStatus(pedido.id, { status: 'em_andamento', agente_log: null });
@@ -112,7 +135,8 @@ async function runPedido(pedido, deps) {
     await prepareWorkspace({ root: workdir, github, branch, skipInstall: deps.skipInstall, log });
     const tools = makeTools(workdir);
     const messages = [{ role: 'system', content: systemPrompt(workdir, pedido) }, { role: 'user', content: userPrompt(pedido) }];
-    log(`modelo: ${llm.name}`);
+    if (llm.ready) await llm.ready();   // descobre o modelo disponível na conta
+    log(`🤖 Agente iniciado (modelo ${llm.name}). Pedido: ${um(pedido.titulo, 80)}`, true);
 
     let summary = null, buildRetries = 0, formatErrors = 0;
     for (let step = 1; step <= MAX_STEPS && summary === null; step++) {
@@ -137,18 +161,19 @@ async function runPedido(pedido, deps) {
           if (!tools.impl[tc.name]) throw new Error(`ferramenta desconhecida: ${tc.name}`);
           if (tc.args.__parse_error !== undefined) throw new Error('argumentos não são JSON válido');
           out = await tools.impl[tc.name](tc.args);
-          log(`${tc.name}(${String(tc.args.path || tc.args.text || '').slice(0, 60)}) ok`);
+          log(descreve(tc.name, tc.args, out), tc.name === 'replace_in_file' || tc.name === 'create_file');
           if (tc.name === 'finish') {
             // Antes de aceitar o fim: o build precisa passar.
             if (!tools.changed.size) { summary = `Sem alterações: ${out || 'o agente decidiu não mexer.'}`; break; }
+            log('🔨 Conferindo se o site continua montando (build)…', true);
             const b = await shell(buildCmd, workdir, 300000);
             if (!b.ok) {
               if (++buildRetries > MAX_BUILD_RETRIES) throw new Error(`o build falhou mesmo após ${MAX_BUILD_RETRIES} correções:\n${b.out.slice(-500)}`);
-              log(`build falhou — devolvendo o erro ao modelo (tentativa ${buildRetries})`);
+              log(`❌ O build falhou — mostrando o erro ao agente pra ele corrigir (tentativa ${buildRetries})`, true);
               out = `O BUILD FALHOU. Corrija e chame finish de novo. Erro:\n${b.out.slice(-1500)}`;
-            } else { log('build ok'); summary = out || 'Ajuste feito.'; }
+            } else { log('✅ Build passou — o site monta normalmente', true); summary = out || 'Ajuste feito.'; }
           }
-        } catch (e) { out = `ERRO: ${e.message}`; log(`${tc.name} → ${e.message}`); }
+        } catch (e) { out = `ERRO: ${e.message}`; log(`⚠️ ${tc.name}${tc.args?.path ? ' em ' + tc.args.path : ''} não deu: ${um(e.message, 160)}`); }
         messages.push({ role: 'tool', tool_call_id: tc.id, content: String(out).slice(0, 14000) });
       }
     }
@@ -167,14 +192,14 @@ async function runPedido(pedido, deps) {
     if (!files.length) throw new Error('nenhuma diferença no git');
     await sh('git', ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local', 'commit', '-m', `IA: ${pedido.titulo}\n\nPedido de ajuste #${pedido.id}.\n${summary}`], workdir);
     await sh('git', ['push', 'origin', `HEAD:refs/heads/${branch}`], workdir, 180000);
-    log(`branch enviada: ${branch}`);
+    log(`📤 Mudança enviada para a branch ${branch}`, true);
 
     const pr = await github.createPR({ head: branch, title: `IA: ${pedido.titulo}`, body: `Pedido de ajuste #${pedido.id}\n\n${summary}\n\nArquivos:\n${files.map(f => `- ${f}`).join('\n')}\n\n_Gerado pelo agente do Uniko. Revise antes de aprovar._` });
     await setStatus(pedido.id, { status: 'em_revisao', nota_ia: summary, pr_url: pr.url, pr_number: pr.number, branch, agente_log: flushLog() });
-    log(`PR aberto: ${pr.url}`);
+    log(`🔀 Pull request aberto: ${pr.url}`, true);
     return { ok: true, pr, files, summary };
   } catch (e) {
-    log(`FALHOU: ${e.message}`);
+    log(`💥 Falhou: ${um(scrub(e.message), 200)}`, true);
     await setStatus(pedido.id, { status: 'falhou', nota_ia: scrub(e.message).slice(0, 600), agente_log: flushLog() }).catch(() => {});
     return { ok: false, reason: e.message };
   }
