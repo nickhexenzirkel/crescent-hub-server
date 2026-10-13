@@ -61,6 +61,16 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Prévia do pull request (Vercel): a aba pergunta até ficar pronta.
+  app.get('/api/agent/preview/:id', requireAdmin, async (req, res) => {
+    try {
+      if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
+      const p = await getPedido(req.params.id);
+      if (!p || !p.branch) return res.status(404).json({ error: 'este pedido não tem branch' });
+      res.json(await github.previewUrl(p.branch));
+    } catch (e) { res.status(500).json({ error: scrub(e.message) }); }
+  });
+
   // Aprovar: mescla o PR (a Vercel publica o site sozinha quando a main muda).
   app.post('/api/agent/approve/:id', requireAdmin, async (req, res) => {
     try {
