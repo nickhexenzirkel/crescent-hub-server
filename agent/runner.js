@@ -12,6 +12,7 @@ const G = require('./guard');
 const { buildContext } = require('./context');
 const { firstJsonObject } = require('./llm');
 const { planSystem, planUser } = require('./prompts');
+const acoes = require('./acoes');
 
 const MAX_STEPS = 30;          // voltas do modelo por pedido
 const MAX_BUILD_RETRIES = 2;   // quantas vezes devolve o erro do build pro modelo consertar
@@ -144,6 +145,31 @@ async function runPedido(pedido, deps) {
 
     let summary = null, buildRetries = 0, formatErrors = 0;
     const mode = deps.mode || process.env.AGENT_MODE || 'plan';
+
+    // 1º: o pedido é uma AÇÃO ADMINISTRATIVA (esconder/renomear módulo ou aba, tirar um Uniko de alguém)?
+    // Então não mexe em código: o modelo só entende o pedido e quem executa é código validado (acoes.js).
+    if (deps.supabase && mode !== 'tools') {
+      const acao = await acoes.interpretar({ llm, root: workdir, pedido, supabase: deps.supabase });
+      if (acao && (acao.duvida || acao.erro)) {
+        const nota = acao.duvida ? `Preciso de uma informação pra continuar: ${acao.duvida}` : `Não consegui fazer essa ação: ${acao.erro}`;
+        log(`❓ ${nota}`, true);
+        await setStatus(pedido.id, { status: 'falhou', nota_ia: nota, agente_log: flushLog() });
+        return { ok: false, reason: nota };
+      }
+      if (acao && acao.plano) {
+        log(`🎯 Ação administrativa (não é mudança de código): ${acao.descricao}`, true);
+        if (pedido.auto_publicar || deps.autoPublish) {
+          const r = await acoes.executar(acao.plano, { supabase: deps.supabase, quem: 'Agente de IA' });
+          log(`✅ ${r.resumo}`, true);
+          await setStatus(pedido.id, { status: 'feito', nota_ia: r.resumo, acao: { plano: acao.plano, aplicada: true, undo: r.undo, resumo: r.resumo }, agente_log: flushLog() });
+        } else {
+          log('⏸️ Aguardando a sua aprovação pra aplicar.', true);
+          await setStatus(pedido.id, { status: 'em_revisao', nota_ia: `Vou fazer: ${acao.descricao}. Clique em Aplicar pra confirmar.`, acao: { plano: acao.plano, aplicada: false }, agente_log: flushLog() });
+        }
+        return { ok: true, acao: true };
+      }
+      log('💡 Não é uma ação administrativa — vou resolver mexendo no código.');
+    }
 
     const planLoop = async () => {
       const ctx = await buildContext(workdir, pedido);

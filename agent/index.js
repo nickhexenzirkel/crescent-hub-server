@@ -17,6 +17,7 @@ const path = require('path');
 const { makeProvider } = require('./llm');
 const { makeGithub } = require('./github');
 const { runPedido, undoMerge, scrub } = require('./runner');
+const acoes = require('./acoes');
 
 module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   const TABLE = 'uniko_pedidos_ajuste';
@@ -40,7 +41,7 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
     if (busy) return { started: false, reason: `O agente já está trabalhando no pedido #${busy}.` };
     const nr = notReady(); if (nr) return { started: false, reason: nr };
     busy = pedido.id;
-    runPedido(pedido, { llm, github, workdir, setStatus, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
+    runPedido(pedido, { llm, github, workdir, setStatus, supabase, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
       .catch(e => console.error('[agent] erro inesperado:', scrub(e.message)))
       .finally(() => { busy = null; });
     return { started: true };
@@ -74,8 +75,14 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   // Aprovar: mescla o PR (a Vercel publica o site sozinha quando a main muda).
   app.post('/api/agent/approve/:id', requireAdmin, async (req, res) => {
     try {
-      if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
       const p = await getPedido(req.params.id);
+      // Ação administrativa esperando aprovação (esconder/renomear/tirar Uniko): aplica agora.
+      if (p && p.status === 'em_revisao' && p.acao && !p.acao.aplicada) {
+        const r = await acoes.executar(p.acao.plano, { supabase, quem: 'Agente de IA' });
+        await setStatus(p.id, { status: 'feito', nota_ia: r.resumo, acao: { ...p.acao, aplicada: true, undo: r.undo, resumo: r.resumo } });
+        return res.json({ ok: true });
+      }
+      if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
       if (!p || p.status !== 'em_revisao' || !p.pr_number) return res.status(409).json({ error: 'este pedido não está esperando aprovação' });
       const merged = await github.mergePR(p.pr_number, `IA: ${p.titulo} (#${p.id})`);
       await github.deleteBranch(p.branch);
@@ -88,8 +95,15 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   app.post('/api/agent/undo/:id', requireAdmin, async (req, res) => {
     let travou = false;
     try {
+      const p0 = await getPedido(req.params.id);
+      // Desfazer uma ação administrativa já aplicada.
+      if (p0 && p0.status === 'feito' && p0.acao && p0.acao.aplicada && p0.acao.undo) {
+        await acoes.desfazer(p0.acao.undo, { supabase });
+        await setStatus(p0.id, { status: 'descartado', nota_ia: 'Ação desfeita.', acao: { ...p0.acao, aplicada: false, undo: null } });
+        return res.json({ ok: true });
+      }
       if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
-      const p = await getPedido(req.params.id);
+      const p = p0;
       if (!p || p.status !== 'feito' || !p.merge_sha) return res.status(409).json({ error: 'só dá pra desfazer o que o agente publicou' });
       if (busy) return res.status(409).json({ error: `O agente está ocupado com o pedido #${busy}. Tente em instantes.` });
       busy = p.id; travou = true;
