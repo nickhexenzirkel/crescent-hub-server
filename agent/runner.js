@@ -179,6 +179,7 @@ async function runPedido(pedido, deps) {
       log(`🧭 Contexto montado sem gastar o modelo — arquivos prováveis: ${ctx.files.length ? ctx.files.join(', ') : 'nenhum óbvio'}`, true);
       const sistema = planSystem(workdir);
       let extra = '', feedback = '', badJson = 0;
+      const servidos = new Set();   // buscas/leituras já entregues (não repetir)
       const aplicados = [];
       // Desfaz TODAS as edições já aplicadas: os números de linha mostrados no contexto voltam a valer
       // (sem isso, depois de uma edição os números mudam e o modelo erra o alvo na rodada seguinte).
@@ -202,15 +203,22 @@ async function runPedido(pedido, deps) {
         if (o.give_up) return `Sem alterações: ${String(o.give_up).slice(0, 300)}`;
         if (o.need) {
           const partes = [];
+          let repetidos = 0;
           for (const q of (o.need.search || []).slice(0, 3)) {
+            if (servidos.has('s:' + q)) { repetidos++; continue; }
+            servidos.add('s:' + q);
             try { partes.push(`Busca "${q}":\n${await tools.impl.search({ text: String(q) })}`); log(descreve('search', { text: q }, partes[partes.length - 1])); }
             catch (e) { partes.push(`Busca "${q}": erro ${e.message}`); }
           }
           for (const f of (o.need.read || []).slice(0, 2)) {
+            const chaveLeitura = `r:${f.path}:${f.start}:${f.end}`;
+            if (servidos.has(chaveLeitura)) { repetidos++; continue; }
+            servidos.add(chaveLeitura);
             try { partes.push(await tools.impl.read_file({ path: f.path, start_line: f.start, end_line: f.end })); log(descreve('read_file', { path: f.path, start_line: f.start, end_line: f.end })); }
             catch (e) { partes.push(`Leitura de ${f.path}: erro ${e.message}`); }
           }
           extra += (extra ? '\n' : '') + partes.join('\n');
+          if (repetidos) { feedback = 'Você pediu de novo informações que JÁ foram mostradas (veja "Informação extra" acima). Não peça mais nada igual: com o que tem, envie "edits" ou "give_up" explicando o que falta.'; log(`🔁 O modelo repetiu um pedido de informação (${repetidos}) — mandei decidir com o que já tem`); }
           continue;
         }
         const erros = [];

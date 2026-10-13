@@ -64,7 +64,8 @@ function pessoasCandidatas(pessoas, texto) {
   return pessoas.map(p => ({ p, s: palavras(p).filter(w => set.has(w) && !STOP.has(w)).length })).filter(a => a.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map(a => a.p);
 }
 
-const looksLikeAction = (texto) => /(tirar|retirar|remover|excluir|esconder|ocultar|sumir|desativar|mostrar|reativar|devolver|renomear|trocar o nome|mudar o nome|alterar o nome|chamar de)/i.test(texto);
+// Pela RAIZ das palavras, pra pegar qualquer conjugação: "esconda", "oculte", "retire", "não apareça"…
+const looksLikeAction = (texto) => /(escond|ocult|retir|remov|remo[cç]|\btir[aeo]|exclu|\bsum[aeio]|\bsome\b|desativ|mostr|reativ|devolv|renome|\bnome\b|chamar de|apare[cç]|vis[ií]vel|visibilidade|exib|libera|bloque)/i.test(texto);
 
 // ── Triagem pelo modelo ───────────────────────────────────────────────────────
 function promptTriagem(pedido, c) {

@@ -184,7 +184,7 @@ function groqProvider({ apiKey, model: wanted }) {
         try {
           if (plain) {   // sem ferramentas: o modelo responde um JSON em texto (usado pelo planejador)
             const r = await axios.post(`${BASE}/chat/completions`, {
-              model, messages, temperature: 0.1, max_tokens: 2000,
+              model, messages, temperature: 0.1, max_tokens: 2500,
               ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : null),
             }, { headers, timeout: 120000 });
             return { content: r.data?.choices?.[0]?.message?.content || '', toolCalls: [] };
