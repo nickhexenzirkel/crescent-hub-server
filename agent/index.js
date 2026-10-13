@@ -16,7 +16,7 @@
 const path = require('path');
 const { makeProvider } = require('./llm');
 const { makeGithub } = require('./github');
-const { runPedido, scrub } = require('./runner');
+const { runPedido, undoMerge, scrub } = require('./runner');
 
 module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   const TABLE = 'uniko_pedidos_ajuste';
@@ -40,7 +40,7 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
     if (busy) return { started: false, reason: `O agente já está trabalhando no pedido #${busy}.` };
     const nr = notReady(); if (nr) return { started: false, reason: nr };
     busy = pedido.id;
-    runPedido(pedido, { llm, github, workdir, setStatus })
+    runPedido(pedido, { llm, github, workdir, setStatus, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
       .catch(e => console.error('[agent] erro inesperado:', scrub(e.message)))
       .finally(() => { busy = null; });
     return { started: true };
@@ -77,11 +77,27 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
       if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
       const p = await getPedido(req.params.id);
       if (!p || p.status !== 'em_revisao' || !p.pr_number) return res.status(409).json({ error: 'este pedido não está esperando aprovação' });
-      await github.mergePR(p.pr_number, `IA: ${p.titulo} (#${p.id})`);
+      const merged = await github.mergePR(p.pr_number, `IA: ${p.titulo} (#${p.id})`);
       await github.deleteBranch(p.branch);
-      await setStatus(p.id, { status: 'feito' });
+      await setStatus(p.id, { status: 'feito', merge_sha: merged?.sha || null });
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: scrub(e.message) }); }
+  });
+
+  // Desfazer: reverte uma mudança que o agente já publicou (commit de reversão na main).
+  app.post('/api/agent/undo/:id', requireAdmin, async (req, res) => {
+    let travou = false;
+    try {
+      if (!github) return res.status(503).json({ error: 'GitHub não configurado no servidor.' });
+      const p = await getPedido(req.params.id);
+      if (!p || p.status !== 'feito' || !p.merge_sha) return res.status(409).json({ error: 'só dá pra desfazer o que o agente publicou' });
+      if (busy) return res.status(409).json({ error: `O agente está ocupado com o pedido #${busy}. Tente em instantes.` });
+      busy = p.id; travou = true;
+      await undoMerge({ workdir, github, sha: p.merge_sha });
+      await setStatus(p.id, { status: 'descartado', nota_ia: 'Mudança desfeita (revertida na versão definitiva).', merge_sha: null });
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: scrub(e.message) }); }
+    finally { if (travou) busy = null; }
   });
 
   // Recusar: fecha o PR e devolve o pedido com o comentário (o agente pode tentar de novo).

@@ -202,6 +202,25 @@ async function runPedido(pedido, deps) {
     log(`📤 Mudança enviada para a branch ${branch}`, true);
 
     const pr = await github.createPR({ head: branch, title: `IA: ${pedido.titulo}`, body: `Pedido de ajuste #${pedido.id}\n\n${summary}\n\nArquivos:\n${files.map(f => `- ${f}`).join('\n')}\n\n_Gerado pelo agente do Uniko. Revise antes de aprovar._` });
+    // Modo automático: publica direto na versão definitiva assim que o build passou (o dono pediu
+    // "troca assim que estiver tudo pronto"). Se não conseguir mesclar, cai no fluxo de aprovação.
+    if (pedido.auto_publicar || deps.autoPublish) {
+      log('🚀 Publicando direto na versão definitiva (modo automático)…', true);
+      try {
+        let merged = null, lastErr = null;
+        for (let i = 0; i < 6 && !merged; i++) {
+          try { merged = await github.mergePR(pr.number, `IA: ${pedido.titulo} (#${pedido.id})`); }
+          catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 3000)); }   // o GitHub leva uns segundos pra calcular se dá pra mesclar
+        }
+        if (!merged) throw lastErr || new Error('não consegui mesclar');
+        await Promise.resolve(github.deleteBranch(branch)).catch(() => {});
+        log('✅ Publicado! A Vercel atualiza o site em ~1 minuto.', true);
+        await setStatus(pedido.id, { status: 'feito', nota_ia: summary, pr_url: pr.url, pr_number: pr.number, branch: null, merge_sha: merged.sha || null, agente_log: flushLog() });
+        return { ok: true, pr, files, summary, published: true };
+      } catch (e) {
+        log(`⚠️ Não consegui publicar sozinho (${um(scrub(e.message), 120)}) — ficou aguardando a sua aprovação.`, true);
+      }
+    }
     await setStatus(pedido.id, { status: 'em_revisao', nota_ia: summary, pr_url: pr.url, pr_number: pr.number, branch, agente_log: flushLog() });
     log(`🔀 Pull request aberto: ${pr.url}`, true);
     return { ok: true, pr, files, summary };
@@ -212,4 +231,13 @@ async function runPedido(pedido, deps) {
   }
 }
 
-module.exports = { runPedido, scrub };
+// Desfaz uma mudança já publicada: cria um commit de reversão na main (não apaga histórico).
+async function undoMerge({ workdir, github, sha }) {
+  await prepareWorkspace({ root: workdir, github, branch: 'ia/desfazer-tmp', skipInstall: true, log: () => {} });
+  const cfg = ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local'];
+  try { await sh('git', [...cfg, 'revert', '--no-edit', sha], workdir); }
+  catch (e) { await sh('git', ['revert', '--abort'], workdir).catch(() => {}); throw new Error('não consegui desfazer sozinho (a main mudou depois dessa alteração) — peça um novo ajuste para reverter'); }
+  await sh('git', ['push', 'origin', 'HEAD:refs/heads/main'], workdir, 180000);
+}
+
+module.exports = { runPedido, undoMerge, scrub };
