@@ -9,9 +9,13 @@ const crypto = require('crypto');
 const { execFile, exec } = require('child_process');
 const { DEFINITIONS, makeTools } = require('./tools');
 const G = require('./guard');
+const { buildContext } = require('./context');
+const { firstJsonObject } = require('./llm');
+const { planSystem, planUser } = require('./prompts');
 
 const MAX_STEPS = 30;          // voltas do modelo por pedido
 const MAX_BUILD_RETRIES = 2;   // quantas vezes devolve o erro do build pro modelo consertar
+const MAX_PLAN_ROUNDS = 6;     // chamadas ao modelo no modo planejador
 const KEEP_FULL = 4;           // últimas N mensagens de ferramenta ficam completas; as antigas são resumidas
 
 const scrub = (s) => String(s || '').replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@').replace(/(ghp_|github_pat_|gsk_)[A-Za-z0-9_]+/g, '***');
@@ -139,12 +143,68 @@ async function runPedido(pedido, deps) {
     log(`🤖 Agente iniciado (modelo ${llm.name}). Pedido: ${um(pedido.titulo, 80)}`, true);
 
     let summary = null, buildRetries = 0, formatErrors = 0;
-    for (let step = 1; step <= MAX_STEPS && summary === null; step++) {
+    const mode = deps.mode || process.env.AGENT_MODE || 'plan';
+
+    const planLoop = async () => {
+      const ctx = await buildContext(workdir, pedido);
+      log(`🧭 Contexto montado sem gastar o modelo — arquivos prováveis: ${ctx.files.length ? ctx.files.join(', ') : 'nenhum óbvio'}`, true);
+      const sistema = planSystem(workdir);
+      let extra = '', feedback = '', badJson = 0;
+      const aplicados = [];
+      for (let round = 1; round <= MAX_PLAN_ROUNDS; round++) {
+        log(`💬 Consultando o modelo (rodada ${round} de ${MAX_PLAN_ROUNDS})…`, true);
+        const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados) }], tools: [], plain: true });
+        const o = firstJsonObject(reply.content, x => x && (Array.isArray(x.edits) || x.need || x.give_up));
+        if (!o) {
+          badJson++;
+          log(`⚠️ A resposta do modelo não veio em JSON válido (${badJson}ª vez): ${um(reply.content, 100)}`);
+          if (badJson >= 2 && llm.switchModel) { const novo = await llm.switchModel(); if (novo) log(`🔄 Trocando de modelo para ${novo}`, true); }
+          feedback = 'Sua resposta anterior não era um objeto JSON válido. Responda SOMENTE o objeto JSON.';
+          continue;
+        }
+        feedback = '';
+        if (o.give_up) return `Sem alterações: ${String(o.give_up).slice(0, 300)}`;
+        if (o.need) {
+          const partes = [];
+          for (const q of (o.need.search || []).slice(0, 3)) {
+            try { partes.push(`Busca "${q}":\n${await tools.impl.search({ text: String(q) })}`); log(descreve('search', { text: q }, partes[partes.length - 1])); }
+            catch (e) { partes.push(`Busca "${q}": erro ${e.message}`); }
+          }
+          for (const f of (o.need.read || []).slice(0, 2)) {
+            try { partes.push(await tools.impl.read_file({ path: f.path, start_line: f.start, end_line: f.end })); log(descreve('read_file', { path: f.path, start_line: f.start, end_line: f.end })); }
+            catch (e) { partes.push(`Leitura de ${f.path}: erro ${e.message}`); }
+          }
+          extra += (extra ? '\n' : '') + partes.join('\n');
+          continue;
+        }
+        const erros = [];
+        for (const e of o.edits) {
+          try {
+            if (e.create) await tools.impl.create_file({ path: e.path, content: e.content });
+            else await tools.impl.replace_in_file({ path: e.path, old_string: e.old_string, new_string: e.new_string });
+            aplicados.push(e.path);
+            log(descreve(e.create ? 'create_file' : 'replace_in_file', e), true);
+          } catch (err) { erros.push(`${e.path}: ${err.message}`); log(`⚠️ ${e.path} não deu: ${um(err.message, 160)}`); }
+        }
+        if (erros.length) { feedback = `Estas edições FALHARAM (as demais já foram aplicadas — não repita): ${erros.join(' | ')}. Se o trecho não bate, peça a leitura exata com "need", ou envie a edição corrigida.`; continue; }
+        if (!tools.changed.size) { feedback = 'Nenhuma edição foi aplicada. Envie "edits" com old_string e new_string, ou "give_up".'; continue; }
+        log('🔨 Conferindo se o site continua montando (build)…', true);
+        const b = await shell(buildCmd, workdir, 300000);
+        if (b.ok) { log('✅ Build passou — o site monta normalmente', true); return o.summary || 'Ajuste feito.'; }
+        if (++buildRetries > MAX_BUILD_RETRIES) throw new Error(`o build falhou mesmo após ${MAX_BUILD_RETRIES} correções:\n${b.out.slice(-500)}`);
+        log(`❌ O build falhou — mostrando o erro ao modelo pra corrigir (tentativa ${buildRetries})`, true);
+        feedback = `O BUILD FALHOU depois das suas edições (já aplicadas). Corrija com novas edições. Erro:\n${b.out.slice(-1200)}`;
+      }
+      throw new Error(`não consegui concluir em ${MAX_PLAN_ROUNDS} rodadas`);
+    };
+    if (mode === 'plan') summary = await planLoop();
+
+    for (let step = 1; mode !== 'plan' && step <= MAX_STEPS && summary === null; step++) {
       compact(messages);
       const reply = await llm.chat({ messages, tools: DEFINITIONS });
       if (reply.formatError) {
         formatErrors++;
-        log(`⚠️ O modelo errou o formato de uma ação (${formatErrors}ª vez) — tentando de novo`);
+        log(`⚠️ O modelo errou o formato de uma ação (${formatErrors}ª vez): ${um(reply.formatError, 120)}`);
         // 2º erro: passa pro modo JSON (ferramentas descritas em texto, funciona com qualquer modelo).
         // 4º, 6º…: troca de modelo (outro da conta).
         if (formatErrors === 2 && llm.enableJsonMode && !llm.jsonMode) {

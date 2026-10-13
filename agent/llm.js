@@ -49,6 +49,23 @@ function toJsonMessages(messages, tools) {
   }
   return out;
 }
+// Primeiro objeto JSON balanceado (que o aceita() aprove) dentro de um texto qualquer —
+// tolera cercas de código, conversa antes/depois e chaves dentro de strings.
+function firstJsonObject(text, aceita = () => true) {
+  const s = String(text || '');
+  for (let i = s.indexOf('{'); i !== -1; i = s.indexOf('{', i + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}' && --depth === 0) {
+        try { const o = JSON.parse(s.slice(i, j + 1)); if (aceita(o)) return o; } catch { /* tenta o próximo { */ }
+        break;
+      }
+    }
+  }
+  return null;
+}
 // Acha o primeiro objeto JSON balanceado no texto e extrai { tool, args }.
 function parseJsonCall(text) {
   const s = String(text || '');
@@ -141,13 +158,20 @@ function groqProvider({ apiKey, model: wanted }) {
     },
     get jsonMode() { return jsonMode; },
     enableJsonMode() { jsonMode = true; },
-    async chat({ messages, tools }) {
+    async chat({ messages, tools, plain = false }) {
       await resolve();
       let reresolvido = false;
       // Caracteres de histórico que cabem: (limite − saída pedida − ~700 das definições de ferramentas) × 3.
       const budgetChars = (saida) => Math.max(5000, (tpmLimit - saida - 700) * CHARS_POR_TOKEN);
       for (let tentativa = 0; tentativa < 5; tentativa++) {
         try {
+          if (plain) {   // sem ferramentas: o modelo responde um JSON em texto (usado pelo planejador)
+            const r = await axios.post(`${BASE}/chat/completions`, {
+              model, messages, temperature: 0.1, max_tokens: 2000,
+              ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : null),
+            }, { headers, timeout: 120000 });
+            return { content: r.data?.choices?.[0]?.message?.content || '', toolCalls: [] };
+          }
           if (jsonMode) {
             const r = await axios.post(`${BASE}/chat/completions`, {
               model, messages: toJsonMessages(trimToBudget(messages, budgetChars(2200)), tools), temperature: 0.2, max_tokens: 2200,
@@ -216,4 +240,4 @@ function makeProvider(env = process.env) {
   return null; // provedor desconhecido
 }
 
-module.exports = { makeProvider, groqProvider, pickModel };
+module.exports = { makeProvider, groqProvider, pickModel, firstJsonObject };
