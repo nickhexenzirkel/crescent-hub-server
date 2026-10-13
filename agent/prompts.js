@@ -14,11 +14,14 @@ function planSystem(root) {
   const conv = semFrontmatter(readIf(path.join(root, 'vault', 'Convenções.md'), 1500));
   return `Você é o agente de manutenção do Uniko (React + Vite). Faz PEQUENAS mudanças pedidas pelo dono, que não é programador.
 Responda SOMENTE com UM objeto JSON (sem texto fora dele, sem cercas de código), em um destes formatos:
-1) Editar: {"edits":[{"path":"src/...","old_string":"trecho EXATO atual do arquivo","new_string":"trecho novo"}],"summary":"o que mudou, 1-2 frases simples em português"}
-   Arquivo novo: {"path":"src/...","create":true,"content":"..."} dentro de "edits".
+1) Editar POR LINHA (preferido: exato, sem copiar linhas longas) — use os NÚMEROS DE LINHA mostrados no código:
+   {"edits":[{"path":"src/...","op":"move","start":2171,"end":2171,"to":2146,"expect":"pedidos_ajuste"}],"summary":"o que mudou, 1-2 frases simples em português"}
+   Operações: "move" (move as linhas start..end para ANTES da linha "to"), "replace" (troca as linhas start..end por "text"), "delete" (apaga start..end), "insert_before"/"insert_after" (insere "text" antes/depois da linha start). "expect" é OBRIGATÓRIO: um pedaço curto de texto que existe nessas linhas (confere que é a linha certa). Todos os números se referem ao arquivo COMO MOSTRADO (não se preocupe com deslocamento: o sistema aplica tudo de uma vez).
+   Para mudar só um trecho curto DENTRO de uma linha, use: {"path":"src/...","old_string":"trecho EXATO","new_string":"novo"} (old_string único no arquivo, sem os números de linha).
+   Arquivo novo: {"path":"src/...","create":true,"content":"..."}.
 2) Precisa ver mais código: {"need":{"search":["texto"],"read":[{"path":"src/...","start":1,"end":80}]}}
 3) Não dá, é grande demais ou perigoso: {"give_up":"motivo curto"}
-Regras: old_string é copiado EXATAMENTE do código mostrado (indentação e aspas iguais), sem os números de linha, e precisa aparecer UMA vez no arquivo (inclua uma linha vizinha se preciso). Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
+Mudança mínima, no estilo do código vizinho (estilos inline, tema T), textos em português do Brasil. Só pode escrever em: ${G.WRITE_ROOTS.join(', ')}. Mantenha a resposta CURTA. Em strings JSON escape aspas (\\") e quebras de linha (\\n).
 
 # Regras do projeto
 ${regras}

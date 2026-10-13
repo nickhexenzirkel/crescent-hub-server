@@ -87,6 +87,59 @@ function makeTools(root) {
       if (changed.size > G.MAX_FILES) throw new Error(`mexeu em arquivos demais (máx. ${G.MAX_FILES})`);
       return 'ok';
     },
+    // Edição POR LINHA (exata, sem o modelo reescrever trechos longos). Os números são os do
+    // arquivo ATUAL (como mostrado no contexto). Várias operações por arquivo valem todas
+    // contra a numeração original; o sistema ordena de baixo pra cima e recusa sobreposição.
+    // `expect` é obrigatório: um pedaço de texto que precisa existir nas linhas alvo —
+    // se a linha mudou de lugar, a operação é recusada em vez de alterar a linha errada.
+    async edit_lines({ path: p, ops }) {
+      const { rel, abs } = G.resolveSafe(root, p);
+      G.assertWritable(rel);
+      if (!Array.isArray(ops) || !ops.length) throw new Error('nenhuma operação');
+      const raw = fs.readFileSync(abs, 'utf8');
+      const eol = eolOf(raw);
+      const linhas = raw.replace(/\r\n/g, '\n').split('\n');
+      const N = linhas.length;
+      const norm = ops.map((o, i) => {
+        const op = String(o.op || '');
+        const start = Number(o.start), end = o.end == null ? start : Number(o.end);
+        const to = o.to == null ? null : Number(o.to);
+        if (!['replace', 'delete', 'move', 'insert_before', 'insert_after'].includes(op)) throw new Error(`operação ${i + 1}: "${op}" desconhecida (use replace, delete, move, insert_before, insert_after)`);
+        if (!Number.isInteger(start) || start < 1 || start > N || !Number.isInteger(end) || end < start || end > N) throw new Error(`operação ${i + 1}: linhas ${o.start}-${o.end} fora do arquivo (tem ${N} linhas)`);
+        if (!o.expect || !String(o.expect).trim()) throw new Error(`operação ${i + 1}: falta "expect" (um trecho que existe nessas linhas)`);
+        const alvo = linhas.slice(start - 1, end).join('\n');
+        if (!alvo.includes(String(o.expect))) throw new Error(`operação ${i + 1}: o texto esperado "${String(o.expect).slice(0, 40)}" NÃO está nas linhas ${start}-${end} (lá está: ${alvo.replace(/\s+/g, ' ').slice(0, 90)}). Releia os números de linha.`);
+        if (op === 'move') {
+          if (!Number.isInteger(to) || to < 1 || to > N + 1) throw new Error(`operação ${i + 1}: "to" inválido`);
+          if (to >= start && to <= end + 1) throw new Error(`operação ${i + 1}: "to" cai dentro do próprio bloco`);
+        }
+        if ((op === 'replace' || op === 'insert_before' || op === 'insert_after') && typeof o.text !== 'string') throw new Error(`operação ${i + 1}: falta "text"`);
+        if (typeof o.text === 'string') G.assertContent(o.text);
+        const lo = op === 'move' ? Math.min(start, to) : start, hi = op === 'move' ? Math.max(end, to - 1) : end;
+        return { op, start, end, to, text: o.text, lo, hi };
+      });
+      const ord = [...norm].sort((a, b) => b.hi - a.hi);
+      for (let i = 1; i < ord.length; i++) if (ord[i].hi >= ord[i - 1].lo) throw new Error('duas operações mexem na mesma região — envie em partes ou junte numa só');
+      let removidas = 0, novas = 0;
+      for (const o of ord) {                                        // de baixo pra cima: números das de cima não mudam
+        const novoTxt = typeof o.text === 'string' ? o.text.replace(/\r\n/g, '\n').split('\n') : [];
+        if (o.op === 'replace') { linhas.splice(o.start - 1, o.end - o.start + 1, ...novoTxt); removidas += o.end - o.start + 1; novas += novoTxt.length; }
+        else if (o.op === 'delete') { linhas.splice(o.start - 1, o.end - o.start + 1); removidas += o.end - o.start + 1; }
+        else if (o.op === 'insert_before') { linhas.splice(o.start - 1, 0, ...novoTxt); novas += novoTxt.length; }
+        else if (o.op === 'insert_after') { linhas.splice(o.start, 0, ...novoTxt); novas += novoTxt.length; }
+        else { // move: tira o bloco e põe antes da linha `to` (numeração original)
+          const bloco = linhas.splice(o.start - 1, o.end - o.start + 1);
+          const dest = o.to > o.end ? o.to - 1 - bloco.length : o.to - 1;
+          linhas.splice(dest, 0, ...bloco); removidas += bloco.length; novas += bloco.length;
+        }
+      }
+      const next = linhas.join('\n');
+      if (next.length - raw.replace(/\r\n/g, '\n').length > 100 * 1024) throw new Error('a edição aumentaria o arquivo demais');
+      fs.writeFileSync(abs, eol === '\r\n' ? next.replace(/\n/g, '\r\n') : next);
+      changed.set(rel, (changed.get(rel) || 0) + Math.max(removidas, novas, 1));
+      if (changed.size > G.MAX_FILES) throw new Error(`mexeu em arquivos demais (máx. ${G.MAX_FILES})`);
+      return 'ok';
+    },
     async finish({ summary }) { return summary || ''; },
   };
 

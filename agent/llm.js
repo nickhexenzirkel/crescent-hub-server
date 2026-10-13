@@ -51,6 +51,20 @@ function toJsonMessages(messages, tools) {
 }
 // Primeiro objeto JSON balanceado (que o aceita() aprove) dentro de um texto qualquer —
 // tolera cercas de código, conversa antes/depois e chaves dentro de strings.
+// Modelos costumam colocar quebras de linha/tabs REAIS dentro das strings do JSON (inválido). Escapa-as.
+function repairJson(t) {
+  let out = '', inStr = false, esc = false;
+  for (const c of t) {
+    if (inStr) {
+      if (esc) { esc = false; out += c; continue; }
+      if (c === String.fromCharCode(92)) { esc = true; out += c; continue; }
+      if (c === '"') { inStr = false; out += c; continue; }
+      const BS = String.fromCharCode(92);
+      out += c === String.fromCharCode(10) ? BS + 'n' : c === String.fromCharCode(13) ? BS + 'r' : c === String.fromCharCode(9) ? BS + 't' : c;
+    } else { if (c === '"') inStr = true; out += c; }
+  }
+  return out;
+}
 function firstJsonObject(text, aceita = () => true) {
   const s = String(text || '');
   for (let i = s.indexOf('{'); i !== -1; i = s.indexOf('{', i + 1)) {
@@ -59,7 +73,10 @@ function firstJsonObject(text, aceita = () => true) {
       const c = s[j];
       if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
       if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}' && --depth === 0) {
-        try { const o = JSON.parse(s.slice(i, j + 1)); if (aceita(o)) return o; } catch { /* tenta o próximo { */ }
+        const trecho = s.slice(i, j + 1);
+        for (const cand of [trecho, repairJson(trecho)]) {
+          try { const o = JSON.parse(cand); if (aceita(o)) return o; } catch { /* tenta o reparado / o próximo { */ }
+        }
         break;
       }
     }

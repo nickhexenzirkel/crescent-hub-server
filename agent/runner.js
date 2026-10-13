@@ -159,7 +159,7 @@ async function runPedido(pedido, deps) {
           badJson++;
           log(`⚠️ A resposta do modelo não veio em JSON válido (${badJson}ª vez): ${um(reply.content, 100)}`);
           if (badJson >= 2 && llm.switchModel) { const novo = await llm.switchModel(); if (novo) log(`🔄 Trocando de modelo para ${novo}`, true); }
-          feedback = 'Sua resposta anterior não era um objeto JSON válido. Responda SOMENTE o objeto JSON.';
+          feedback = 'Sua resposta anterior não era um JSON válido (talvez tenha sido CORTADA por ser longa). Responda SOMENTE o objeto JSON e prefira operações POR LINHA (op/start/end/to/expect), que são curtas — não copie linhas longas.';
           continue;
         }
         feedback = '';
@@ -178,7 +178,22 @@ async function runPedido(pedido, deps) {
           continue;
         }
         const erros = [];
-        for (const e of o.edits) {
+        // Operações por linha do MESMO arquivo vão juntas (valem contra a numeração original).
+        const porLinha = new Map(), outras = [];
+        for (const e of o.edits) { if (e && e.op) { if (!porLinha.has(e.path)) porLinha.set(e.path, []); porLinha.get(e.path).push(e); } else outras.push(e); }
+        for (const [p, ops] of porLinha) {
+          try {
+            const antes = readIf(path.join(workdir, p), 5e6).split('\n');
+            await tools.impl.edit_lines({ path: p, ops });
+            aplicados.push(p);
+            for (const op of ops) {
+              const alvo = um(antes.slice(op.start - 1, (op.end || op.start)).join(' '), 80);
+              const quando = op.op === 'move' ? `movendo as linhas ${op.start}${op.end && op.end !== op.start ? `-${op.end}` : ''} para antes da linha ${op.to}` : op.op === 'delete' ? `apagando as linhas ${op.start}-${op.end || op.start}` : op.op === 'replace' ? `trocando as linhas ${op.start}-${op.end || op.start}` : `inserindo ${op.op === 'insert_after' ? 'depois' : 'antes'} da linha ${op.start}`;
+              log(`✏️ EDITANDO ${p} — ${quando}\n     linha: ${alvo}`, true);
+            }
+          } catch (err) { erros.push(`${p}: ${err.message}`); log(`⚠️ ${p} não deu: ${um(err.message, 200)}`); }
+        }
+        for (const e of outras) {
           try {
             if (e.create) await tools.impl.create_file({ path: e.path, content: e.content });
             else await tools.impl.replace_in_file({ path: e.path, old_string: e.old_string, new_string: e.new_string });
