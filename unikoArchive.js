@@ -106,6 +106,19 @@ async function removeFiles(bucket, paths) {
   }
 }
 
+// `.in()` vai na URL: lista grande estoura o limite. Consulta em fatias de 100.
+async function selectIn(table, cols, col, values, extra) {
+  const out = [];
+  for (let i = 0; i < values.length; i += 100) {
+    let q = sb.from(table).select(cols).in(col, values.slice(i, i + 100));
+    if (extra) q = extra(q);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    out.push(...(data || []));
+  }
+  return out;
+}
+
 // ── Paginação (o Supabase corta em 1000 linhas por consulta) ──
 async function* pages(buildQuery, pageSize = 500) {
   for (let from = 0; ; from += pageSize) {
@@ -197,8 +210,8 @@ const SYSTEMS = {
       const withId = rows.filter(r => r.wa_message_id), noId = rows.filter(r => !r.wa_message_id);
       if (withId.length) {
         const ids = withId.map(r => r.wa_message_id);
-        const { data: existing } = await sb.from('uniko_security_messages').select('wa_message_id').in('wa_message_id', ids);
-        const have = new Set((existing || []).map(e => e.wa_message_id));
+        const existing = await selectIn('uniko_security_messages', 'wa_message_id', 'wa_message_id', ids);
+        const have = new Set(existing.map(e => e.wa_message_id));
         const novos = withId.filter(r => !have.has(r.wa_message_id));
         st.skipped = (st.skipped || 0) + (withId.length - novos.length);
         for (let i = 0; i < novos.length; i += 200) {
@@ -208,9 +221,8 @@ const SYSTEMS = {
         st.restored = (st.restored || 0) + novos.length;
       }
       if (noId.length) {
-        const { data: existing } = await sb.from('uniko_security_messages').select('sent_at,direction,text')
-          .eq('contact_id', contactId).in('sent_at', noId.map(r => r.sent_at));
-        const have = new Set((existing || []).map(e => `${new Date(e.sent_at).getTime()}|${e.direction}|${e.text}`));
+        const existing = await selectIn('uniko_security_messages', 'sent_at,direction,text', 'sent_at', noId.map(r => r.sent_at), (q) => q.eq('contact_id', contactId));
+        const have = new Set(existing.map(e => `${new Date(e.sent_at).getTime()}|${e.direction}|${e.text}`));
         const novos = noId.filter(r => !have.has(`${new Date(r.sent_at).getTime()}|${r.direction}|${r.text}`));
         st.skipped = (st.skipped || 0) + (noId.length - novos.length);
         for (let i = 0; i < novos.length; i += 200) {
