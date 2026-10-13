@@ -17,6 +17,8 @@ const acoes = require('./acoes');
 const MAX_STEPS = 30;          // voltas do modelo por pedido
 const MAX_BUILD_RETRIES = 2;   // quantas vezes devolve o erro do build pro modelo consertar
 const MAX_PLAN_ROUNDS = 6;     // chamadas ao modelo no modo planejador
+const MAX_CONSTRUCAO_ROUNDS = 14;   // pedidos de CRIAR algo novo precisam de mais rodadas (arquivo por arquivo)
+const MAX_REVISOES = 2;        // revisões "o pedido foi atendido por completo?" no modo construção
 const KEEP_FULL = 4;           // últimas N mensagens de ferramenta ficam completas; as antigas são resumidas
 
 const scrub = (s) => String(s || '').replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@').replace(/(ghp_|github_pat_|gsk_)[A-Za-z0-9_]+/g, '***');
@@ -46,6 +48,38 @@ function relevantNotes(root, pedido, n = 2, maxChars = 700) {
     return { f, score, txt };
   }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, n)
     .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, maxChars)}`);
+}
+
+// Pedido de CRIAR algo novo (jogo, tela, aba, módulo…) — usa o modo construção.
+const isCriacao = (p) => {
+  const t = `${p.titulo || ''} ${p.descricao || ''}`;
+  return /\b(cri[ae]r?|crie|adicion[ae]r?|construa|construir|mont[ae]r?|implement[ae]r?|desenvolv[ae]r?|fa[çc]a (um|uma)|nov[oa])\b/i.test(t)
+    && /(jogo|tela|aba\b|tab\b|m[óo]dulo|p[áa]gina|componente|calculadora|painel|widget|formul[áa]rio|quiz|game)/i.test(t);
+};
+// Procura sinais de "esqueleto" (placeholder, texto fixo) nos arquivos novos.
+const PLACEHOLDER_RE = /(placeholder|exemplo simples|\bexemplo de\b|\bTODO\b|implementar aqui|aqui vai|em breve|\bstub\b|lorem ipsum)/i;
+function detectarEsqueleto(root, criados, pedido) {
+  const arqs = [...criados].filter(f => /\.(jsx?|tsx?)$/.test(f));
+  let linhas = 0, interativo = false;
+  for (const f of arqs) {
+    const t = readIf(path.join(root, f), 2e6);
+    linhas += t.split('\n').length;
+    if (PLACEHOLDER_RE.test(t)) return `O arquivo ${f} parece um ESQUELETO (tem texto como "placeholder/exemplo/TODO"). Implemente a funcionalidade de verdade e reenvie o arquivo completo (create:true reescreve).`;
+    if (/(onKeyDown|keydown|onClick|onPointer|onTouch|addEventListener|setInterval|requestAnimationFrame)/.test(t)) interativo = true;
+  }
+  if (/jogo|game/i.test(`${pedido.titulo} ${pedido.descricao}`)) {
+    if (linhas < 90) return `Os arquivos novos somam só ${linhas} linhas — pouco para um jogo funcional. Implemente as regras, o controle do jogador e o placar de verdade (arquivo por arquivo).`;
+    if (!interativo) return 'Os arquivos novos não têm nenhum controle do jogador (teclado/clique/toque) nem laço de jogo (setInterval/requestAnimationFrame). Implemente a interação de verdade.';
+  }
+  return null;
+}
+// Resumo do que já foi criado (exports + tamanho) pra o modelo continuar de forma consistente.
+function resumoCriados(root, criados) {
+  return [...criados].map(f => {
+    const t = readIf(path.join(root, f), 2e6);
+    const exps = [...t.matchAll(/export\s+(?:const|function|class|default function)\s+([A-Za-z0-9_]+)/g)].map(m => m[1]);
+    return `- ${f} (${t.split('\n').length} linhas)${exps.length ? ` exporta: ${exps.join(', ')}` : ''}`;
+  }).join('\n');
 }
 
 function systemPrompt(root, pedido) {
@@ -188,16 +222,31 @@ async function runPedido(pedido, deps) {
       let extra = '', feedback = '', badJson = 0;
       const servidos = new Set();   // buscas/leituras já entregues (não repetir)
       const aplicados = [];
-      // Desfaz TODAS as edições já aplicadas: os números de linha mostrados no contexto voltam a valer
-      // (sem isso, depois de uma edição os números mudam e o modelo erra o alvo na rodada seguinte).
-      const desfazerTudo = async () => {
-        await sh('git', ['checkout', '--', '.'], workdir).catch(() => {});
-        await sh('git', ['clean', '-fd', '--', 'src', 'vault'], workdir).catch(() => {});
-        tools.changed.clear(); aplicados.length = 0;
+      const construcao = deps.construcao !== undefined ? !!deps.construcao : isCriacao(pedido);
+      const maxRodadas = construcao ? MAX_CONSTRUCAO_ROUNDS : MAX_PLAN_ROUNDS;
+      let revisoes = 0;
+      if (construcao) log('🏗️ Pedido de CRIAR algo novo — modo construção (arquivo por arquivo, com revisão no fim)', true);
+      // Ponto de partida das edições. No modo construção, cada etapa que deu certo vira um "checkpoint"
+      // (commit local): um erro depois desfaz só a rodada atual, sem perder o que já foi construído.
+      let snapChanged = new Map(), snapCriados = new Set(), snapAplicados = [];
+      const checkpoint = async () => {
+        await sh('git', ['add', '-A', '--', 'src', 'vault'], workdir);
+        const st = (await sh('git', ['diff', '--cached', '--name-only'], workdir)).trim();
+        if (st) await sh('git', ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local', 'commit', '-m', 'IA: etapa intermediária'], workdir);
+        snapChanged = new Map(tools.changed); snapCriados = new Set(tools.created); snapAplicados = [...aplicados];
       };
-      for (let round = 1; round <= MAX_PLAN_ROUNDS; round++) {
-        log(`💬 Consultando o modelo (rodada ${round} de ${MAX_PLAN_ROUNDS})…`, true);
-        const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados, notasTxt) }], tools: [], plain: true });
+      // Desfaz as edições da rodada atual (volta ao último checkpoint ou ao código original): os números de linha
+      // mostrados no contexto voltam a valer (sem isso, depois de uma edição os números mudam e o modelo erra o alvo).
+      const desfazerTudo = async () => {
+        await sh('git', ['reset', '--hard', 'HEAD'], workdir).catch(() => {});
+        await sh('git', ['clean', '-fd', '--', 'src', 'vault'], workdir).catch(() => {});
+        tools.changed.clear(); for (const [k, v] of snapChanged) tools.changed.set(k, v);
+        tools.created.clear(); for (const k of snapCriados) tools.created.add(k);
+        aplicados.length = 0; aplicados.push(...snapAplicados);
+      };
+      for (let round = 1; round <= maxRodadas; round++) {
+        log(`💬 Consultando o modelo (rodada ${round} de ${maxRodadas})…`, true);
+        const reply = await llm.chat({ messages: [{ role: 'system', content: sistema }, { role: 'user', content: planUser(userPrompt(pedido), ctx, extra, feedback, aplicados, notasTxt, { ativo: construcao, resumo: construcao ? resumoCriados(workdir, tools.created) : '' }) }], tools: [], plain: true });
         const o = firstJsonObject(reply.content, x => x && (Array.isArray(x.edits) || x.need || x.give_up));
         if (!o) {
           badJson++;
@@ -246,29 +295,57 @@ async function runPedido(pedido, deps) {
         }
         for (const e of outras) {
           try {
-            if (e.create) await tools.impl.create_file({ path: e.path, content: e.content });
+            if (e.create) await tools.impl.create_file({ path: e.path, content: e.content, append: !!e.append });
             else await tools.impl.replace_in_file({ path: e.path, old_string: e.old_string, new_string: e.new_string });
             aplicados.push(e.path);
-            log(descreve(e.create ? 'create_file' : 'replace_in_file', e), true);
+            log(descreve(e.create ? 'create_file' : 'replace_in_file', e) + (e.create && e.append ? ' (continuação)' : ''), true);
           } catch (err) { erros.push(`${e.path}: ${err.message}`); log(`⚠️ ${e.path} não deu: ${um(err.message, 160)}`); }
         }
         if (erros.length) {
           await desfazerTudo();
-          log('↩️ Houve erro em alguma edição — desfiz todas pra recomeçar com os números de linha originais', true);
+          log('↩️ Houve erro em alguma edição — desfiz as desta rodada (o que já estava guardado fica)', true);
           feedback = `Estas edições FALHARAM: ${erros.join(' | ')}. TODAS as suas edições desta resposta foram DESFEITAS (nada foi alterado), então os números de linha são os do código mostrado. Envie de novo o conjunto COMPLETO de edições, corrigido (ou use "need" para ver mais código).`;
           continue;
         }
         if (!tools.changed.size) { feedback = 'Nenhuma edição foi aplicada. Envie "edits" com old_string e new_string, ou "give_up".'; continue; }
+        if (construcao) {
+          const falta = Array.isArray(o.falta) ? o.falta.map(String).filter(Boolean) : [];
+          if (falta.length) {          // ainda há partes por construir: guarda o progresso e segue
+            await checkpoint();
+            feedback = `Aplicado e guardado. Continue com o que falta: ${falta.join('; ')}. Responda só com o(s) próximo(s) arquivo(s)/edição(ões).`;
+            log(`🧩 Parte aplicada. Falta: ${um(falta.join('; '), 140)}`, true);
+            continue;
+          }
+          const esqueleto = detectarEsqueleto(workdir, tools.created, pedido);
+          if (esqueleto) { await checkpoint(); feedback = esqueleto; log(`🧐 Revisão automática: ${um(esqueleto, 150)}`, true); continue; }
+        }
         log('🔨 Conferindo se o site continua montando (build)…', true);
         const b = await shell(buildCmd, workdir, 300000);
-        if (b.ok) { log('✅ Build passou — o site monta normalmente', true); return o.summary || 'Ajuste feito.'; }
+        if (b.ok) {
+          log('✅ Build passou — o site monta normalmente', true);
+          // Modo construção: uma revisão final — o que foi criado atende o pedido por inteiro?
+          if (construcao && revisoes < MAX_REVISOES && tools.created.size) {
+            revisoes++;
+            const arquivos = [...tools.created].slice(0, 3).map(f => `## ${f}\n${readIf(path.join(workdir, f), 3200)}`).join('\n\n');
+            const rev = await llm.chat({ messages: [{ role: 'user', content: `Você revisa um trabalho feito por um agente. PEDIDO: ${pedido.titulo}. ${pedido.descricao || ''}\n\nArquivos criados (podem estar cortados):\n${arquivos}\n\nO pedido foi atendido POR COMPLETO, de forma funcional e sem esqueleto/placeholder? Responda SOMENTE um JSON: {"completo":true} ou {"faltando":"o que falta, em 1 a 3 frases objetivas"}.` }], tools: [], plain: true });
+            const r = firstJsonObject(rev.content, x => x && (x.completo !== undefined || x.faltando));
+            if (r && r.faltando && !r.completo) {
+              await checkpoint();
+              feedback = `REVISÃO: o pedido ainda NÃO está completo. Falta: ${String(r.faltando).slice(0, 400)}. Implemente o que falta (reescreva o arquivo com create:true ou acrescente com append:true, ou use operações por linha).`;
+              log(`🧐 Revisão: ainda falta — ${um(r.faltando, 160)}`, true);
+              continue;
+            }
+            log('🧐 Revisão: o pedido foi atendido por completo ✔', true);
+          }
+          return o.summary || 'Ajuste feito.';
+        }
         if (++buildRetries > MAX_BUILD_RETRIES) throw new Error(`o build falhou mesmo após ${MAX_BUILD_RETRIES} correções:\n${b.out.slice(-500)}`);
         log(`❌ O build falhou — mostrando o erro ao modelo pra corrigir (tentativa ${buildRetries})`, true);
         await desfazerTudo();
-        log('↩️ Desfiz as edições (o build quebrou) para tentar de novo com os números de linha originais', true);
+        log('↩️ Desfiz as edições desta rodada (o build quebrou) — o que já estava guardado fica', true);
         feedback = `O BUILD FALHOU com as suas edições, então elas foram DESFEITAS (o código voltou ao original e os números de linha são os do código mostrado). Provável causa: um número de linha errado deixou a sintaxe quebrada (ex.: "to" caiu numa linha que abre ou fecha a lista, e não entre os itens dela). Envie o conjunto COMPLETO corrigido. Erro do build:\n${b.out.slice(-1000)}`;
       }
-      throw new Error(`não consegui concluir em ${MAX_PLAN_ROUNDS} rodadas`);
+      throw new Error(`não consegui concluir em ${maxRodadas} rodadas`);
     };
     if (mode === 'plan') summary = await planLoop();
 
@@ -331,10 +408,13 @@ async function runPedido(pedido, deps) {
 
     // Defesa em profundidade: revisa o que de fato vai no commit.
     await sh('git', ['add', '-A', '--', 'src', 'vault'], workdir);
-    const files = (await sh('git', ['diff', '--cached', '--name-only'], workdir)).split('\n').filter(Boolean);
+    // Compara com o código original (inclui etapas já guardadas como checkpoint).
+    const files = (await sh('git', ['diff', '--name-only', 'origin/main'], workdir)).split('\n').filter(Boolean);
     for (const f of files) G.assertWritable(f);
     if (!files.length) throw new Error('nenhuma diferença no git');
-    await sh('git', ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local', 'commit', '-m', `IA: ${pedido.titulo}\n\nPedido de ajuste #${pedido.id}.\n${summary}`], workdir);
+    if ((await sh('git', ['diff', '--cached', '--name-only'], workdir)).trim()) {
+      await sh('git', ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local', 'commit', '-m', `IA: ${pedido.titulo}\n\nPedido de ajuste #${pedido.id}.\n${summary}`], workdir);
+    }
     await sh('git', ['push', 'origin', `HEAD:refs/heads/${branch}`], workdir, 180000);
     logUso();
     log(`📤 Mudança enviada para a branch ${branch}`, true);

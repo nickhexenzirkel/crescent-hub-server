@@ -29,6 +29,7 @@ const DEFINITIONS = [
 
 function makeTools(root) {
   const changed = new Map(); // rel → linhas alteradas (aprox.)
+  const created = new Set(); // arquivos NOVOS criados nesta execução (podem ser continuados/reescritos)
   const eolOf = (t) => (t.includes('\r\n') ? '\r\n' : '\n');
 
   const impl = {
@@ -75,15 +76,20 @@ function makeTools(root) {
       if (changed.size > G.MAX_FILES) throw new Error(`mexeu em arquivos demais (máx. ${G.MAX_FILES})`);
       return 'ok';
     },
-    async create_file({ path: p, content }) {
+    async create_file({ path: p, content, append = false }) {
       const { rel, abs } = G.resolveSafe(root, p);
       G.assertWritable(rel);
       G.assertContent(content);
-      if (fs.existsSync(abs)) throw new Error('esse arquivo JÁ EXISTE — não recrie: escolha outro nome para o arquivo novo, ou altere o existente com operações por linha');
+      if (typeof content !== 'string' || !content.trim()) throw new Error('content vazio');
+      const existe = fs.existsSync(abs);
+      if (existe && !created.has(rel)) throw new Error('esse arquivo JÁ EXISTE — não recrie: escolha outro nome para o arquivo novo, ou altere o existente com operações por linha');
       if (Buffer.byteLength(content) > G.MAX_FILE_BYTES) throw new Error('arquivo grande demais');
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content);
-      changed.set(rel, content.split('\n').length);
+      // Arquivo criado por você nesta tarefa: "append":true acrescenta no final (para escrever em partes); sem append, reescreve inteiro.
+      if (existe && append) fs.appendFileSync(abs, content.startsWith('\n') ? content : '\n' + content);
+      else fs.writeFileSync(abs, content);
+      created.add(rel);
+      changed.set(rel, fs.readFileSync(abs, 'utf8').split('\n').length);
       if (changed.size > G.MAX_FILES) throw new Error(`mexeu em arquivos demais (máx. ${G.MAX_FILES})`);
       return 'ok';
     },
@@ -144,7 +150,7 @@ function makeTools(root) {
   };
 
   const totalLines = () => [...changed.values()].reduce((a, b) => a + b, 0);
-  return { impl, changed, totalLines };
+  return { impl, changed, created, totalLines };
 }
 
 module.exports = { DEFINITIONS, makeTools };

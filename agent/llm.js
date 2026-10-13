@@ -142,11 +142,23 @@ function trimToBudget(messages, budgetChars) {
   return [...out, ...mantidos.flat()];
 }
 
+// Modo plain: se o total passa do orçamento, corta o MEIO da última mensagem do usuário (as instruções ficam no system)
+// e mantém o começo (pedido) e o fim (avisos/feedback), que são o que mais importa.
+function cortarUsuario(messages, limiteChars) {
+  const total = messages.reduce((a, m) => a + String(m.content || '').length, 0);
+  if (total <= limiteChars) return messages;
+  const i = messages.length - 1, ultimo = String(messages[i].content || '');
+  const manter = Math.max(1500, limiteChars - (total - ultimo.length));
+  const cortada = ultimo.slice(0, Math.floor(manter * 0.55)) + '\n…(trecho cortado pelo limite de tamanho)…\n' + ultimo.slice(-Math.floor(manter * 0.45));
+  return messages.map((m, k) => (k === i ? { ...m, content: cortada } : m));
+}
+
 function groqProvider({ apiKey, model: wanted }) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   let model = null, ids = [];
   let jsonMode = false;
-  let tpmLimit = 6000;   // limite de tokens/minuto assumido (aprende com o erro da Groq)
+  let tpmLimit = 8000;   // limite de tokens/minuto assumido (aprende com o erro da Groq)
+  let fatorCorte = 1;    // encolhe a mensagem do usuário (modo plain) a cada "Request too large"
   const excluded = new Set();   // modelos que falharam repetidamente nesta execução
 
   async function resolve(force = false) {
@@ -184,7 +196,7 @@ function groqProvider({ apiKey, model: wanted }) {
         try {
           if (plain) {   // sem ferramentas: o modelo responde um JSON em texto (usado pelo planejador)
             const r = await axios.post(`${BASE}/chat/completions`, {
-              model, messages, temperature: 0.1, max_tokens: 2500,
+              model, messages: cortarUsuario(messages, Math.max(4000, (tpmLimit - 2500) * 3) * fatorCorte), temperature: 0.1, max_tokens: 2500,
               ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : null),
             }, { headers, timeout: 120000 });
             return { content: r.data?.choices?.[0]?.message?.content || '', toolCalls: [] };
@@ -228,7 +240,8 @@ function groqProvider({ apiKey, model: wanted }) {
           // Limite de tokens/minuto do plano gratuito: espera o que a API mandar e tenta de novo.
           const mGrande = /Limit (\d+), Requested (\d+)/.exec(msg);
           if (mGrande && /too large|reduce your message/i.test(msg) && tentativa < 3) {
-            tpmLimit = Math.max(2500, Math.min(tpmLimit, Number(mGrande[1])) - 800 * (tentativa + 1));   // aprende o limite real e aperta mais a cada tentativa
+            tpmLimit = Math.max(2500, Math.min(tpmLimit, Number(mGrande[1])) - 800 * (tentativa + 1));
+            fatorCorte *= 0.75;   // aprende o limite real e aperta mais a cada tentativa
             continue;
           }
           if (status === 429 || status >= 500) {

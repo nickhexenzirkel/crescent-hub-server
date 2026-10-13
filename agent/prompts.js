@@ -29,12 +29,24 @@ ${regras}
 ${conv}`;
 }
 
-function planUser(pedidoTexto, ctx, extra, feedback, aplicados, notas) {
+const BLOCO_CONSTRUCAO = `# MODO CONSTRUÇÃO — o pedido é CRIAR algo novo
+- Implemente DE VERDADE e por completo, com TODAS as funcionalidades pedidas. Proibido: placeholder, "exemplo", TODO, texto fixo ou desenho no lugar da funcionalidade.
+- Divida em arquivos pequenos (cada um com até ~120 linhas): a lógica pura em um (ex.: nomeLogic.js, sem React) e a interface em outro (ex.: TabNome.jsx, que importa a lógica).
+- Mande UM ou DOIS arquivos por resposta. Se ainda faltar algo, inclua no JSON "falta":["próximo passo", ...] (lista curta); quando TUDO estiver pronto, omita "falta" (ou deixe []) e preencha "summary".
+- Para escrever um arquivo em partes: {"path":"...","create":true,"append":true,"content":"..."} acrescenta ao final de um arquivo que VOCÊ já criou. Sem "append", o arquivo é reescrito por inteiro.
+- Registre a tela/aba nos arquivos existentes com operações por linha (insert_after), conforme a nota do cofre.`;
+
+function planUser(pedidoTexto, ctx, extra, feedback, aplicados, notas, cons) {
   const partes = [pedidoTexto];
+  if (cons && cons.ativo) {
+    partes.push(BLOCO_CONSTRUCAO);
+    if (cons.resumo) partes.push(`# Já criado nesta tarefa (confira os nomes ao importar)\n${cons.resumo}`);
+  }
   partes.push('# Código encontrado (o número e o TAB no começo de cada linha são só referência — NÃO fazem parte do código)');
-  partes.push(ctx.snippets || '(nenhum trecho óbvio encontrado — use "need" com search)');
-  if (notas) partes.push(`# Notas do cofre relacionadas ao pedido (siga as instruções delas)\n${notas}`);
-  if (extra) partes.push(`# Informação extra que você pediu\n${extra.slice(-3500)}`);
+  const tetoCodigo = cons && cons.ativo ? 4500 : 7500;
+  partes.push((ctx.snippets || '(nenhum trecho óbvio encontrado — use "need" com search)').slice(0, tetoCodigo));
+  if (notas) partes.push(`# Notas do cofre relacionadas ao pedido (siga as instruções delas)\n${String(notas).slice(0, 3000)}`);
+  if (extra) partes.push(`# Informação extra que você pediu\n${extra.slice(-2500)}`);
   if (aplicados.length) partes.push(`# Já aplicado nesta tentativa: ${[...new Set(aplicados)].join(', ')}`);
   if (feedback) partes.push(`# ATENÇÃO\n${feedback}`);
   return partes.join('\n');
