@@ -21,7 +21,12 @@ const acoes = require('./acoes');
 
 module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   const TABLE = 'uniko_pedidos_ajuste';
-  const llm = makeProvider(process.env);
+  // Dois agentes: Groq (grátis) e OpenAI (pago). Cada pedido escolhe o seu (coluna "agente");
+  // sem escolha, vale AGENT_PROVIDER (padrão groq). Provedores são criados na hora, por execução.
+  const temChave = { groq: !!process.env.GROQ_API_KEY, openai: !!process.env.OPENAI_API_KEY };
+  const padrao = (process.env.AGENT_PROVIDER || 'groq').toLowerCase();
+  const escolherProvedor = (p) => { const q = String(p?.agente || padrao).toLowerCase(); return temChave[q] ? q : (temChave[padrao] ? padrao : (temChave.groq ? 'groq' : (temChave.openai ? 'openai' : q))); };
+  const llm = makeProvider(process.env, padrao);   // só pra mostrar o modelo padrão na tela
   const github = process.env.GITHUB_TOKEN && process.env.AGENT_REPO ? makeGithub({ token: process.env.GITHUB_TOKEN, repo: process.env.AGENT_REPO }) : null;
   const workdir = process.env.AGENT_WORKDIR || path.join(__dirname, '..', 'agent-workspace', 'repo');
   let busy = null; // id do pedido em execução (1 por vez)
@@ -35,20 +40,24 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
     if (error) throw new Error(error.message);
     return data;
   };
-  const notReady = () => (!llm ? 'Falta GROQ_API_KEY no servidor.' : !github ? 'Falta GITHUB_TOKEN / AGENT_REPO no servidor.' : null);
+  const notReady = () => (!temChave.groq && !temChave.openai ? 'Falta GROQ_API_KEY (ou OPENAI_API_KEY) no servidor.' : !github ? 'Falta GITHUB_TOKEN / AGENT_REPO no servidor.' : null);
 
   async function start(pedido) {
     if (busy) return { started: false, reason: `O agente já está trabalhando no pedido #${busy}.` };
     const nr = notReady(); if (nr) return { started: false, reason: nr };
     busy = pedido.id;
-    runPedido(pedido, { llm, github, workdir, setStatus, supabase, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
+    const qual = escolherProvedor(pedido);
+    const llmDoPedido = makeProvider(process.env, qual);
+    if (!llmDoPedido) { busy = null; return { started: false, reason: `Falta a chave do agente "${qual}" no servidor.` }; }
+    runPedido(pedido, { llm: llmDoPedido, github, workdir, setStatus, supabase, autoPublish: process.env.AGENT_AUTOPUBLISH === '1' })
       .catch(e => console.error('[agent] erro inesperado:', scrub(e.message)))
       .finally(() => { busy = null; });
     return { started: true };
   }
 
   app.get('/api/agent/config', requireAdmin, (req, res) => {
-    res.json({ llm: !!llm, github: !!github, auto: process.env.AGENT_AUTO === '1', busy, model: llm?.name || null, notReady: notReady() });
+    res.json({ llm: temChave.groq || temChave.openai, github: !!github, auto: process.env.AGENT_AUTO === '1', busy, model: llm?.name || null, notReady: notReady(),
+      provedores: { groq: temChave.groq, openai: temChave.openai }, padrao });
   });
 
   app.post('/api/agent/run/:id', requireAdmin, async (req, res) => {

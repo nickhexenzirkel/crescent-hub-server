@@ -248,11 +248,18 @@ function groqProvider({ apiKey, model: wanted }) {
   };
 }
 
-function makeProvider(env = process.env) {
-  const which = (env.AGENT_PROVIDER || 'groq').toLowerCase();
+// Provedores disponíveis: 'groq' (gratuito) e 'openai' (pago, cartão da conta).
+// makeProvider(env, 'groq'|'openai') → provedor ou null se faltar a chave.
+function makeProvider(env = process.env, escolha = null) {
+  const which = String(escolha || env.AGENT_PROVIDER || 'groq').toLowerCase();
   if (which === 'groq') {
     if (!env.GROQ_API_KEY) return null;
     return groqProvider({ apiKey: env.GROQ_API_KEY, model: env.AGENT_MODEL || null });
+  }
+  if (which === 'openai') {
+    if (!env.OPENAI_API_KEY) return null;
+    const { openaiProvider } = require('./llm-openai');
+    return openaiProvider({ apiKey: env.OPENAI_API_KEY, model: env.AGENT_OPENAI_MODEL || null });
   }
   return null; // provedor desconhecido
 }

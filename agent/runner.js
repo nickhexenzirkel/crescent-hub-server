@@ -145,6 +145,8 @@ async function runPedido(pedido, deps) {
 
     let summary = null, buildRetries = 0, formatErrors = 0;
     const mode = deps.mode || process.env.AGENT_MODE || 'plan';
+    // Provedores pagos (OpenAI) contam os tokens: mostra no passo a passo quanto o pedido consumiu.
+    const logUso = () => { const u = llm.usage; if (u && u.chamadas) log(`💲 Uso do modelo: ${u.entrada} tokens de entrada + ${u.saida} de saída em ${u.chamadas} chamada(s)`); };
 
     // 1º: o pedido é uma AÇÃO ADMINISTRATIVA (esconder/renomear módulo ou aba, tirar um Uniko de alguém)?
     // Então não mexe em código: o modelo só entende o pedido e quem executa é código validado (acoes.js).
@@ -157,6 +159,7 @@ async function runPedido(pedido, deps) {
         return { ok: false, reason: nota };
       }
       if (acao && acao.plano) {
+        logUso();
         log(`🎯 Ação administrativa (não é mudança de código): ${acao.descricao}`, true);
         if (pedido.auto_publicar || deps.autoPublish) {
           const r = await acoes.executar(acao.plano, { supabase: deps.supabase, quem: 'Agente de IA' });
@@ -318,6 +321,7 @@ async function runPedido(pedido, deps) {
     if (!files.length) throw new Error('nenhuma diferença no git');
     await sh('git', ['-c', 'user.name=Uniko IA', '-c', 'user.email=ia@uniko.local', 'commit', '-m', `IA: ${pedido.titulo}\n\nPedido de ajuste #${pedido.id}.\n${summary}`], workdir);
     await sh('git', ['push', 'origin', `HEAD:refs/heads/${branch}`], workdir, 180000);
+    logUso();
     log(`📤 Mudança enviada para a branch ${branch}`, true);
 
     const pr = await github.createPR({ head: branch, title: `IA: ${pedido.titulo}`, body: `Pedido de ajuste #${pedido.id}\n\n${summary}\n\nArquivos:\n${files.map(f => `- ${f}`).join('\n')}\n\n_Gerado pelo agente do Uniko. Revise antes de aprovar._` });
