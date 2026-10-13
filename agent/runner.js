@@ -148,7 +148,11 @@ async function runPedido(pedido, deps) {
     let summary = null, buildRetries = 0, formatErrors = 0;
     const mode = deps.mode || process.env.AGENT_MODE || 'plan';
     // Provedores pagos (OpenAI) contam os tokens: mostra no passo a passo quanto o pedido consumiu.
-    const logUso = () => { const u = llm.usage; if (u && u.chamadas) log(`💲 Uso do modelo: ${u.entrada} tokens de entrada + ${u.saida} de saída em ${u.chamadas} chamada(s)`); };
+    const logUso = () => {
+      const u = llm.usage; if (!u || !u.chamadas) return;
+      const pago = /^openai:/.test(llm.name);   // só a OpenAI é cobrada; os outros usam plano grátis
+      log(`${pago ? '💲 Uso do modelo (PAGO)' : '📊 Uso do modelo (plano grátis)'} — ${llm.name}: ${u.entrada} tokens de entrada + ${u.saida} de saída em ${u.chamadas} chamada(s)`);
+    };
 
     // 1º: o pedido é uma AÇÃO ADMINISTRATIVA (esconder/renomear módulo ou aba, tirar um Uniko de alguém)?
     // Então não mexe em código: o modelo só entende o pedido e quem executa é código validado (acoes.js).
