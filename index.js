@@ -3928,6 +3928,10 @@ require('./unikoArchive')(app, { requireAdmin });
 // Aba "Armazenamento" do Dashboard RH: tamanho do banco/Storage dos 2 projetos Supabase.
 require('./storageReport')(app, { requireAdmin, supabase });
 
+// Agente de manutenção do Uniko: resolve Pedidos de Ajuste sozinho (branch + build + pull request).
+// Precisa de GROQ_API_KEY, GITHUB_TOKEN e AGENT_REPO no .env. Ver agent/index.js.
+require('./agent')(app, { requireAdmin, supabase });
+
 // ═══════════════════════════════════════════════════════
 // UNIKO CALL — recebe o áudio de chamada do WhatsApp Web gravado pela
 // extensão Cat-Bot, transcreve (Groq Whisper) e grava como "conversa".

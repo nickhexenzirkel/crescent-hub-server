@@ -1,2 +1,5 @@
 .env
 server_env.txt
+
+# Cópia de trabalho do agente de IA
+agent-workspace/
