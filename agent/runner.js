@@ -12,7 +12,7 @@ const G = require('./guard');
 
 const MAX_STEPS = 30;          // voltas do modelo por pedido
 const MAX_BUILD_RETRIES = 2;   // quantas vezes devolve o erro do build pro modelo consertar
-const KEEP_FULL = 6;           // últimas N mensagens de ferramenta ficam completas; as antigas são resumidas
+const KEEP_FULL = 4;           // últimas N mensagens de ferramenta ficam completas; as antigas são resumidas
 
 const scrub = (s) => String(s || '').replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@').replace(/(ghp_|github_pat_|gsk_)[A-Za-z0-9_]+/g, '***');
 
@@ -40,12 +40,12 @@ function relevantNotes(root, pedido, n = 3) {
     const score = uniq.reduce((s, w) => s + (hay.includes(w) ? (f.includes(w) ? 3 : 1) : 0), 0);
     return { f, score, txt };
   }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, n)
-    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, 1400)}`);
+    .map(x => `### ${x.f}\n${x.txt.replace(/^---[\s\S]*?---\n/, '').slice(0, 900)}`);
 }
 
 function systemPrompt(root, pedido) {
-  const regras = readIf(path.join(root, 'vault', 'Regras da IA.md'), 2200).replace(/^---[\s\S]*?---\n/, '');
-  const conv = readIf(path.join(root, 'vault', 'Convenções.md'), 2600).replace(/^---[\s\S]*?---\n/, '');
+  const regras = readIf(path.join(root, 'vault', 'Regras da IA.md'), 1500).replace(/^---[\s\S]*?---\n/, '');
+  const conv = readIf(path.join(root, 'vault', 'Convenções.md'), 1800).replace(/^---[\s\S]*?---\n/, '');
   const notas = relevantNotes(root, pedido).join('\n\n');
   return `Você é o agente de manutenção do sistema Uniko (React + Vite). Faz PEQUENAS mudanças pedidas pelo dono, que não é programador.
 Trabalhe assim: 1) use search/list_dir para achar o arquivo certo; 2) read_file só no trecho necessário; 3) replace_in_file com o menor trecho possível; 4) chame finish com um resumo simples em português.
@@ -130,7 +130,7 @@ async function runPedido(pedido, deps) {
   };
   const branch = `ia/pedido-${pedido.id}-${Date.now().toString(36)}`;
 
-  await setStatus(pedido.id, { status: 'em_andamento', agente_log: null });
+  await setStatus(pedido.id, { status: 'em_andamento', agente_log: null, nota_ia: null });
   try {
     await prepareWorkspace({ root: workdir, github, branch, skipInstall: deps.skipInstall, log });
     const tools = makeTools(workdir);
@@ -145,8 +145,12 @@ async function runPedido(pedido, deps) {
       if (reply.formatError) {
         formatErrors++;
         log(`⚠️ O modelo errou o formato de uma ação (${formatErrors}ª vez) — tentando de novo`);
-        // 2 erros seguidos: troca de modelo (outro da conta) em vez de insistir no mesmo.
-        if (formatErrors % 2 === 0 && llm.switchModel) {
+        // 2º erro: passa pro modo JSON (ferramentas descritas em texto, funciona com qualquer modelo).
+        // 4º, 6º…: troca de modelo (outro da conta).
+        if (formatErrors === 2 && llm.enableJsonMode && !llm.jsonMode) {
+          llm.enableJsonMode();
+          log('🔁 Mudando a forma de falar com o modelo (modo JSON)', true);
+        } else if (formatErrors >= 4 && formatErrors % 2 === 0 && llm.switchModel) {
           const novo = await llm.switchModel();
           if (novo) log(`🔄 Trocando de modelo para ${novo}`, true);
         }

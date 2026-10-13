@@ -17,7 +17,7 @@ const DEFINITIONS = [
     parameters: { type: 'object', properties: { path: { type: 'string', description: 'ex.: src/shared' } }, required: ['path'] } },
   { name: 'search', description: 'Procura um texto (literal) nos arquivos de src/ e vault/. Devolve arquivo:linha:trecho. Use para achar onde algo está.',
     parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
-  { name: 'read_file', description: 'Lê um arquivo (com números de linha). Máximo 200 linhas por chamada: use start_line/end_line.',
+  { name: 'read_file', description: 'Lê um arquivo (com números de linha). Máximo 120 linhas por chamada: use start_line/end_line.',
     parameters: { type: 'object', properties: { path: { type: 'string' }, start_line: { type: 'integer' }, end_line: { type: 'integer' } }, required: ['path'] } },
   { name: 'replace_in_file', description: 'Troca um trecho EXATO do arquivo por outro. old_string precisa existir uma única vez (inclua linhas vizinhas para ficar único). Copie o texto exatamente como está, com a indentação.',
     parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } },
@@ -50,11 +50,11 @@ function makeTools(root) {
       const { rel, abs } = G.resolveSafe(root, p);
       G.assertReadable(rel);
       const st = fs.statSync(abs);
-      if (st.size > G.MAX_FILE_BYTES * 3) throw new Error('arquivo grande demais para ler inteiro — use search e start_line/end_line');
+      if (st.size > 4 * 1024 * 1024) throw new Error('arquivo grande demais para ler inteiro — use search e start_line/end_line');
       const lines = fs.readFileSync(abs, 'utf8').split(/\r?\n/);
-      const a = Math.max(1, start_line || 1), b = Math.min(lines.length, end_line || a + 199, a + 199);
+      const a = Math.max(1, start_line || 1), b = Math.min(lines.length, end_line || a + 119, a + 119);
       const body = lines.slice(a - 1, b).map((l, i) => `${a + i}\t${l}`).join('\n');
-      return clip(`[${rel}  linhas ${a}-${b} de ${lines.length}]\n${body}`, 14000);
+      return clip(`[${rel}  linhas ${a}-${b} de ${lines.length}]\n${body}`, 7000);
     },
     async replace_in_file({ path: p, old_string, new_string }) {
       const { rel, abs } = G.resolveSafe(root, p);
@@ -69,7 +69,7 @@ function makeTools(root) {
       if (n === 0) throw new Error('old_string não encontrado — releia o arquivo e copie o trecho exatamente');
       if (n > 1) throw new Error(`old_string aparece ${n} vezes — inclua mais linhas ao redor para ficar único`);
       const next = text.replace(oldN, () => newN);
-      if (Buffer.byteLength(next) > G.MAX_FILE_BYTES) throw new Error('arquivo ficaria grande demais');
+      if (next.length - text.length > 100 * 1024 || Buffer.byteLength(next) > 4 * 1024 * 1024) throw new Error('a edição aumentaria o arquivo demais — faça uma mudança menor');
       fs.writeFileSync(abs, eol === '\r\n' ? next.replace(/\n/g, '\r\n') : next);
       changed.set(rel, (changed.get(rel) || 0) + Math.max(oldN.split('\n').length, newN.split('\n').length));
       if (changed.size > G.MAX_FILES) throw new Error(`mexeu em arquivos demais (máx. ${G.MAX_FILES})`);

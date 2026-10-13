@@ -25,9 +25,55 @@ function pickModel(ids, wanted) {
   return ok[0] || null;
 }
 
+// ── Modo JSON (plano B) ──────────────────────────────────────────────────────
+// Alguns modelos erram o formato nativo de "chamada de ferramenta" (erro
+// "Parsing failed"). Nesse modo as ferramentas são descritas no texto e o
+// modelo responde com UM objeto JSON {"tool":..., "args":{...}} — funciona com
+// qualquer modelo de chat. O histórico é convertido para mensagens de texto.
+function jsonSystemExtra(tools) {
+  const lista = tools.map(t => `- ${t.name}(${Object.keys(t.parameters.properties).join(', ')}): ${t.description}`).join('\n');
+  return `\n\n# COMO USAR AS FERRAMENTAS\nVocê NÃO tem chamada de função nativa. Em cada resposta escreva SOMENTE um objeto JSON válido, sem texto fora dele e sem cercas de código:\n{"tool":"nome_da_ferramenta","args":{"parametro":"valor"}}\nFerramentas:\n${lista}\nUma ferramenta por resposta. Strings em JSON: escape aspas (\\") e quebras de linha (\\n).`;
+}
+function toJsonMessages(messages, tools) {
+  const nomes = new Map();   // tool_call_id → nome
+  const out = [];
+  for (const m of messages) {
+    if (m.role === 'system') out.push({ role: 'system', content: m.content + jsonSystemExtra(tools) });
+    else if (m.role === 'assistant' && m.tool_calls?.length) {
+      for (const tc of m.tool_calls) nomes.set(tc.id, tc.function.name);
+      const tc = m.tool_calls[0];
+      let args = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* mantém vazio */ }
+      out.push({ role: 'assistant', content: JSON.stringify({ tool: tc.function.name, args }) });
+    } else if (m.role === 'tool') out.push({ role: 'user', content: `RESULTADO de ${nomes.get(m.tool_call_id) || 'ferramenta'}:\n${m.content}` });
+    else out.push({ role: m.role, content: m.content || '' });
+  }
+  return out;
+}
+// Acha o primeiro objeto JSON balanceado no texto e extrai { tool, args }.
+function parseJsonCall(text) {
+  const s = String(text || '');
+  for (let i = s.indexOf('{'); i !== -1; i = s.indexOf('{', i + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}' && --depth === 0) {
+        try {
+          const o = JSON.parse(s.slice(i, j + 1));
+          const name = o.tool || o.name || o.function;
+          if (name) return { id: 'j' + Math.random().toString(36).slice(2, 9), name, args: o.args || o.arguments || o.parameters || {} };
+        } catch { /* tenta o próximo { */ }
+        break;
+      }
+    }
+  }
+  return null;
+}
+
 function groqProvider({ apiKey, model: wanted }) {
   const headers = { Authorization: `Bearer ${apiKey}` };
   let model = null, ids = [];
+  let jsonMode = false;
   const excluded = new Set();   // modelos que falharam repetidamente nesta execução
 
   async function resolve(force = false) {
@@ -54,11 +100,22 @@ function groqProvider({ apiKey, model: wanted }) {
       model = outro; wanted = null;
       return model;
     },
+    get jsonMode() { return jsonMode; },
+    enableJsonMode() { jsonMode = true; },
     async chat({ messages, tools }) {
       await resolve();
       let reresolvido = false;
       for (let tentativa = 0; tentativa < 5; tentativa++) {
         try {
+          if (jsonMode) {
+            const r = await axios.post(`${BASE}/chat/completions`, {
+              model, messages: toJsonMessages(messages, tools), temperature: 0.2, max_tokens: 3000,
+              ...(/gpt-oss/.test(model) ? { reasoning_effort: 'low' } : null),
+            }, { headers, timeout: 120000 });
+            const text = r.data?.choices?.[0]?.message?.content || '';
+            const call = parseJsonCall(text);
+            return call ? { content: '', toolCalls: [call] } : { content: '', toolCalls: [], formatError: 'resposta sem JSON de ferramenta' };
+          }
           const r = await axios.post(`${BASE}/chat/completions`, {
             model, messages, temperature: 0.2, max_tokens: 2048,
             tools: tools.map(t => ({ type: 'function', function: t })), tool_choice: 'auto',
