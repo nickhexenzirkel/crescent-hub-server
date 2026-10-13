@@ -27,8 +27,10 @@ module.exports = function registerAgent(app, { requireAdmin, supabase }) {
   const temChave = provedores.temChave(process.env);
   const algumaChave = () => Object.values(temChave).some(Boolean);
   // Troca AUTOMÁTICA: se o agente escolhido falhar por motivo técnico (limite, formato, rodadas), tenta estes em ordem.
-  // Ex.: AGENT_FALLBACK=gemini,cerebras  (vazio = desligado; o dono troca na mão pelo seletor da aba).
-  const fallbacks = String(process.env.AGENT_FALLBACK || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  // Padrão (AGENT_FALLBACK não definido): TODOS os agentes GRATUITOS que têm chave, na ordem da lista (nunca o pago por conta própria).
+  // AGENT_FALLBACK=gemini,cerebras define a ordem na mão (pode incluir openai); AGENT_FALLBACK=off desliga.
+  const fbEnv = String(process.env.AGENT_FALLBACK || '').trim().toLowerCase();
+  const fallbacks = fbEnv === 'off' ? [] : (fbEnv ? fbEnv.split(',').map(s => s.trim()).filter(Boolean) : provedores.LISTA.filter(p => !p.pago).map(p => p.id));
   const padrao = (process.env.AGENT_PROVIDER || 'groq').toLowerCase();
   const escolherProvedor = (p) => { const q = String(p?.agente || padrao).toLowerCase(); return temChave[q] ? q : (temChave[padrao] ? padrao : (provedores.configurados(process.env)[0]?.id || q)); };
   const llm = makeProvider(process.env, padrao);   // só pra mostrar o modelo padrão na tela
