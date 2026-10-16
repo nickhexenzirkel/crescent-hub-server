@@ -337,10 +337,24 @@ function avisoSeconds() {
   });
 }
 
-async function retranscribe(id) {
+// `auto`: segunda passada automática (15 s depois da primeira). Não mostra "processando" na tela, só troca
+// o texto se o novo vier preenchido, e NUNCA derruba pra erro uma ligação que já tinha transcrição boa.
+const SEGUNDA_PASSADA_MS = Number(process.env.UNIKO_CALL_RETRANSCRIBE_MS ?? 15000); // 0 desliga
+function agendarSegundaPassada(id) {
+  if (!SEGUNDA_PASSADA_MS) return;
+  setTimeout(() => {
+    if (retranscribing.has(id)) return;
+    retranscribing.add(id);
+    console.log(`[uniko-call] recording id=${id}: 2ª transcrição automática (${SEGUNDA_PASSADA_MS / 1000}s depois).`);
+    retranscribe(id, { auto: true });
+  }, SEGUNDA_PASSADA_MS);
+}
+
+async function retranscribe(id, { auto = false } = {}) {
   const log = (m) => console.log(`[uniko-call] retranscrever id=${id}: ${m}`);
   try {
-    const { data: row, error } = await supabaseCall.from('uniko_call_recordings').select('id, consent_given').eq('id', id).single();
+    const { data: row, error } = await supabaseCall.from('uniko_call_recordings').select('id, consent_given, audio_url').eq('id', id).single();
+    if (auto && !row?.audio_url) return; // sem áudio guardado (apagado/sem consentimento): nada a refazer
     if (error) throw new Error(error.message);
     const dl = await supabaseCall.storage.from('uniko-call').download(`${id}.webm`);
     if (dl.error) throw new Error('não consegui baixar o áudio: ' + (dl.error.message || 'arquivo ausente'));
@@ -361,6 +375,7 @@ async function retranscribe(id) {
       }
     }
 
+    if (auto && !text) { log('2ª passada automática voltou vazia — mantendo a transcrição anterior.'); return; }
     const consent = row.consent_given === true || hasConsentNotice(text);
     if (!consent) {
       await deleteAudio(id);
@@ -374,6 +389,7 @@ async function retranscribe(id) {
     log(`pronto (${text.length} caracteres).`);
   } catch (e) {
     console.error(`[uniko-call] retranscrever id=${id}: falhou:`, e.message);
+    if (auto) return; // 2ª passada automática falhou: a transcrição da 1ª continua valendo
     await supabaseCall.from('uniko_call_recordings').update({ status: 'error', error: e.message }).eq('id', id).then(() => {}, () => {});
   } finally { retranscribing.delete(id); }
 }
@@ -525,7 +541,10 @@ module.exports = function registerUnikoCallRoutes(app, upload, deps) {
         const { error: updErr } = await supabaseCall.from('uniko_call_recordings')
           .update({ transcript: text, status: 'done', consent_given: true }).eq('id', recording.id);
         if (updErr) console.error(`[uniko-call] recording id=${recording.id}: update (consentido) falhou:`, updErr.message);
-        else console.log(`[uniko-call] recording id=${recording.id}: gravado como "done" com transcrição.`);
+        else {
+          console.log(`[uniko-call] recording id=${recording.id}: gravado como "done" com transcrição.`);
+          agendarSegundaPassada(recording.id);
+        }
       } else {
         // Aviso prévio NÃO dito — por segurança/proteção de dados, a gravação
         // não é mantida: apaga o áudio já subido e não guarda a transcrição.
