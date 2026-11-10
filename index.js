@@ -753,6 +753,7 @@ function requireAdmin(req, res, next) {
     next();
   });
 }
+require('./emailGmail')(app, { supabase, requireAdmin });
 // Admin OU moderador — usado nas rotas de funcionários que o Dashboard RH já
 // libera pro moderador no cliente (abas Funcionários / Gerenciar Usuários /
 // Informações Pessoais). Sem isso, o servidor barrava com 403 e a lista de
