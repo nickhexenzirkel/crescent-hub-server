@@ -180,6 +180,16 @@ function metadata(message) {
   };
 }
 
+function ignoredMessage(message) {
+  const headers = headerMap(message.payload);
+  const sender = String(headers.from || '').toLowerCase();
+  const subject = String(headers.subject || '').trim().toLowerCase();
+  const isMailsuite = /mailsuite|mail[\s._-]*track/.test(`${sender} ${subject}`);
+  const isReply = Boolean(headers['in-reply-to'] || headers.references)
+    || /^(re|res|fw|fwd)\s*:/i.test(subject);
+  return isMailsuite || isReply;
+}
+
 function routeError(res, label, error) {
   const status = error instanceof GoogleError && error.status >= 400 && error.status < 500
     ? error.status
@@ -290,14 +300,15 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       const params = new URLSearchParams({ q, maxResults: '20' });
       if (req.query.pageToken) params.set('pageToken', String(req.query.pageToken).slice(0, 1024));
       const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
-      const messages = await Promise.all((page.messages || []).map(async item => {
+      const details = await Promise.all((page.messages || []).map(async item => {
         const detail = await gmailJson(
           supabase,
           req.user.id,
-          `/messages/${encodeURIComponent(item.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`,
+          `/messages/${encodeURIComponent(item.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=In-Reply-To&metadataHeaders=References`,
         );
-        return metadata({ ...detail, snippet: item.snippet });
+        return { ...detail, snippet: item.snippet };
       }));
+      const messages = details.filter(item => !ignoredMessage(item)).map(metadata);
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
     } catch (error) {
       routeError(res, 'listar mensagens', error);
@@ -329,29 +340,19 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
   });
 
   app.get('/api/email/messages/:messageId/attachments/:attachmentId', requireAdmin, async (req, res) => {
-    if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId) || !/^[A-Za-z0-9_-]+$/.test(req.params.attachmentId)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId) || !/^[A-Za-z0-9_-]+=*$/.test(req.params.attachmentId)) {
       return res.status(400).json({ error: 'Identificador de anexo inválido.' });
     }
     try {
-      const message = await gmailJson(
-        supabase,
-        req.user.id,
-        `/messages/${encodeURIComponent(req.params.messageId)}?format=full`,
-      );
-      const content = { text: '', html: '', attachments: [] };
-      walkParts(message.payload, content);
-      const attachment = content.attachments.find(item => item.id === req.params.attachmentId);
-      if (!attachment) return res.status(404).json({ error: 'O anexo não foi encontrado nesta mensagem.' });
-
       const result = await gmailJson(
         supabase,
         req.user.id,
         `/messages/${encodeURIComponent(req.params.messageId)}/attachments/${encodeURIComponent(req.params.attachmentId)}`,
       );
-      const filename = String(attachment.filename || 'anexo').replace(/[\r\n"]/g, '_');
+      const filename = String(req.query.filename || 'anexo').replace(/[\r\n"]/g, '_');
       const asciiFilename = filename.replace(/[^\x20-\x7E]/g, '_').replace(/[\\;/]/g, '_');
       const encodedFilename = encodeURIComponent(filename).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-      const mimeType = /^[\w.+-]+\/[\w.+-]+$/.test(attachment.mimeType) ? attachment.mimeType : 'application/octet-stream';
+      const mimeType = /^[\w.+-]+\/[\w.+-]+$/.test(req.query.mimeType) ? req.query.mimeType : 'application/octet-stream';
       res.setHeader('Content-Type', mimeType);
       res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodedFilename}`);
       res.setHeader('X-Content-Type-Options', 'nosniff');
