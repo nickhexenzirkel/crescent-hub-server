@@ -9,7 +9,7 @@ const refreshes = new Map();
 const faturamentoCache = new Map();
 const faturamentoRequests = new Map();
 const faturamentoCooldowns = new Map();
-const FATURAMENTO_CACHE_TTL = 5 * 60 * 1000;
+const FATURAMENTO_CACHE_TTL = 24 * 60 * 60 * 1000;
 const FATURAMENTO_COOLDOWN_DEFAULT = 60;
 
 function limparCacheFaturamento(userId) {
@@ -429,6 +429,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       return res.status(400).json({ error: 'Informe o mês ou o intervalo de datas para consultar o faturamento.' });
     }
     const filterKey = usaIntervaloDias ? `date:${startDate}:${endDate}` : `month:${month}`;
+    const forcarAtualizacao = req.query.refresh === '1';
     const pageToken = String(req.query.pageToken || '');
     if (pageToken.length > 1024) {
       return res.status(400).json({ error: 'A página solicitada para o histórico é inválida.' });
@@ -437,7 +438,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     const userId = String(req.user.id);
     const cacheKey = `${userId}:${filterKey}:${pageToken}`;
     const cached = faturamentoCache.get(cacheKey);
-    if (cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
+    if (!forcarAtualizacao && cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
       return res.json({ ...cached.data, cached: true, cachedAt: new Date(cached.cachedAt).toISOString() });
     }
 
