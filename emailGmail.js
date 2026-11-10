@@ -6,6 +6,16 @@ const GMAIL_BATCH_API_URL = 'https://www.googleapis.com/batch/gmail/v1';
 const TOKEN_KEY_PREFIX = 'gmail_oauth_user_';
 const oauthStates = new Map();
 const refreshes = new Map();
+const faturamentoCache = new Map();
+const faturamentoRequests = new Map();
+const FATURAMENTO_CACHE_TTL = 5 * 60 * 1000;
+
+function limparCacheFaturamento(userId) {
+  const prefixo = `${String(userId)}:`;
+  for (const key of faturamentoCache.keys()) {
+    if (key.startsWith(prefixo)) faturamentoCache.delete(key);
+  }
+}
 
 function configurationReady() {
   return Boolean(
@@ -337,6 +347,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
         expiry_date: Date.now() + expiresIn * 1000,
         email: profile.emailAddress || '',
       });
+      limparCacheFaturamento(entry.userId);
       res.type('html').send('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Gmail conectado</title><body style="font:16px sans-serif;text-align:center;padding:48px;color:#234"><h2>Gmail conectado ao Uniko</h2><p>Você já pode voltar ao módulo E-mail.</p><script>setTimeout(()=>window.close(),700)</script></body></html>');
     } catch (error) {
       console.error('[Gmail] OAuth callback:', error.message);
@@ -348,6 +359,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     try {
       const { error } = await supabase.from('settings').delete().eq('key', tokenKey(req.user.id));
       if (error) return routeError(res, 'desconectar conta', error);
+      limparCacheFaturamento(req.user.id);
       res.json({ ok: true });
     } catch (error) {
       routeError(res, 'desconectar conta', error);
@@ -383,8 +395,20 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return res.status(400).json({ error: 'Informe um mês válido para consultar o faturamento.' });
     }
+    const pageToken = String(req.query.pageToken || '');
+    if (pageToken.length > 1024) {
+      return res.status(400).json({ error: 'A página solicitada para o histórico é inválida.' });
+    }
 
-    try {
+    const cacheKey = `${String(req.user.id)}:${month}:${pageToken}`;
+    const cached = faturamentoCache.get(cacheKey);
+    if (cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
+      return res.json({ ...cached.data, cached: true, cachedAt: new Date(cached.cachedAt).toISOString() });
+    }
+
+    let request = faturamentoRequests.get(cacheKey);
+    if (!request) {
+      request = (async () => {
       const account = await loadAccount(supabase, req.user.id);
       if (!account?.refresh_token || !account.email) {
         throw new GoogleError('Conecte uma conta Gmail para consultar o faturamento.', 401);
@@ -396,48 +420,69 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       const end = `${nextMonth.getUTCFullYear()}/${String(nextMonth.getUTCMonth() + 1).padStart(2, '0')}/${String(nextMonth.getUTCDate()).padStart(2, '0')}`;
       const query = `in:sent after:${start} before:${end} {"nota fiscal" "nota fiscal eletrônica" "NF-e" DANFE faturamento refaturamento fatura}`;
       const headers = ['From', 'To', 'Subject', 'Date'];
-      const messages = [];
-      let pageToken = '';
-      let truncated = false;
+      const params = new URLSearchParams({ q: query, maxResults: '50' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
+      const items = page.messages || [];
+      const paths = items.map(item => {
+        const detailParams = new URLSearchParams({ format: 'metadata' });
+        for (const header of headers) detailParams.append('metadataHeaders', header);
+        return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
+      });
+      const details = paths.length
+        ? await gmailBatchJson(supabase, req.user.id, paths)
+        : [];
+      details.forEach((detail, index) => { detail.snippet = items[index].snippet || ''; });
+      const messages = details
+        .filter(detail => {
+          const messageHeaders = headerMap(detail.payload);
+          return !/mailsuite|mail[\s._-]*track/i.test(`${messageHeaders.from || ''} ${messageHeaders.subject || ''}`);
+        })
+        .map(detail => ({ ...metadata(detail), senderName: req.user.name || '' }));
 
-      for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
-        const params = new URLSearchParams({ q: query, maxResults: '50' });
-        if (pageToken) params.set('pageToken', pageToken);
-        const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
-        const items = page.messages || [];
-        const paths = items.map(item => {
-          const detailParams = new URLSearchParams({ format: 'metadata' });
-          for (const header of headers) detailParams.append('metadataHeaders', header);
-          return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
-        });
-        const details = paths.length
-          ? await gmailBatchJson(supabase, req.user.id, paths)
-          : [];
-        details.forEach((detail, index) => { detail.snippet = items[index].snippet || ''; });
-        messages.push(...details
-          .filter(detail => {
-            const messageHeaders = headerMap(detail.payload);
-            return !/mailsuite|mail[\s._-]*track/i.test(`${messageHeaders.from || ''} ${messageHeaders.subject || ''}`);
-          })
-          .map(detail => ({ ...metadata(detail), senderName: req.user.name || '' })));
-
-        if (!page.nextPageToken) {
-          pageToken = '';
-          break;
-        }
-        pageToken = page.nextPageToken;
-        if (pageIndex === 4) truncated = true;
-      }
-
-      res.json({
+      return {
         month,
         mailbox: account.email,
         senderName: req.user.name || '',
         messages,
-        truncated,
-      });
+        nextPageToken: page.nextPageToken || '',
+        truncated: Boolean(page.nextPageToken),
+      };
+      })();
+      faturamentoRequests.set(cacheKey, request);
+    }
+
+    try {
+      const data = await request;
+      const cachedAt = Date.now();
+      faturamentoCache.set(cacheKey, { data, cachedAt });
+      if (faturamentoCache.size > 500) {
+        for (const [key, value] of faturamentoCache) {
+          if (cachedAt - value.cachedAt >= FATURAMENTO_CACHE_TTL) faturamentoCache.delete(key);
+        }
+        while (faturamentoCache.size > 500) {
+          faturamentoCache.delete(faturamentoCache.keys().next().value);
+        }
+      }
+      res.json({ ...data, cached: false, cachedAt: new Date(cachedAt).toISOString() });
     } catch (error) {
+      if (cached && (error.status === 429 || (error.status === 403 && /quota|rate limit/i.test(error.message)))) {
+        return res.json({
+          ...cached.data,
+          cached: true,
+          stale: true,
+          cachedAt: new Date(cached.cachedAt).toISOString(),
+          warning: 'O Gmail atingiu o limite temporário de consultas. Exibindo a última sincronização disponível.',
+        });
+      }
+      if (error.status === 429 || (error.status === 403 && /quota|rate limit/i.test(error.message))) {
+        return res.status(429).json({
+          error: 'O Gmail atingiu o limite temporário de consultas. Aguarde alguns minutos antes de tentar sincronizar novamente.',
+        });
+      }
       routeError(res, 'consultar faturamento', error);
+    } finally {
+      if (faturamentoRequests.get(cacheKey) === request) faturamentoRequests.delete(cacheKey);
     }
   });
 
