@@ -378,6 +378,69 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
+  app.get('/api/email/faturamento', requireAdmin, async (req, res) => {
+    const month = String(req.query.month || new Date().toISOString().slice(0, 7)).slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      return res.status(400).json({ error: 'Informe um mês válido para consultar o faturamento.' });
+    }
+
+    try {
+      const account = await loadAccount(supabase, req.user.id);
+      if (!account?.refresh_token || !account.email) {
+        throw new GoogleError('Conecte uma conta Gmail para consultar o faturamento.', 401);
+      }
+
+      const [year, monthNumber] = month.split('-').map(Number);
+      const start = `${year}/${String(monthNumber).padStart(2, '0')}/01`;
+      const nextMonth = new Date(Date.UTC(year, monthNumber, 1));
+      const end = `${nextMonth.getUTCFullYear()}/${String(nextMonth.getUTCMonth() + 1).padStart(2, '0')}/${String(nextMonth.getUTCDate()).padStart(2, '0')}`;
+      const query = `in:sent after:${start} before:${end} {"nota fiscal" "nota fiscal eletrônica" "NF-e" DANFE faturamento refaturamento fatura}`;
+      const headers = ['From', 'To', 'Subject', 'Date'];
+      const messages = [];
+      let pageToken = '';
+      let truncated = false;
+
+      for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+        const params = new URLSearchParams({ q: query, maxResults: '50' });
+        if (pageToken) params.set('pageToken', pageToken);
+        const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
+        const items = page.messages || [];
+        const paths = items.map(item => {
+          const detailParams = new URLSearchParams({ format: 'metadata' });
+          for (const header of headers) detailParams.append('metadataHeaders', header);
+          return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
+        });
+        const details = paths.length
+          ? await gmailBatchJson(supabase, req.user.id, paths)
+          : [];
+        details.forEach((detail, index) => { detail.snippet = items[index].snippet || ''; });
+        messages.push(...details
+          .filter(detail => {
+            const messageHeaders = headerMap(detail.payload);
+            return !/mailsuite|mail[\s._-]*track/i.test(`${messageHeaders.from || ''} ${messageHeaders.subject || ''}`);
+          })
+          .map(detail => ({ ...metadata(detail), senderName: req.user.name || '' })));
+
+        if (!page.nextPageToken) {
+          pageToken = '';
+          break;
+        }
+        pageToken = page.nextPageToken;
+        if (pageIndex === 4) truncated = true;
+      }
+
+      res.json({
+        month,
+        mailbox: account.email,
+        senderName: req.user.name || '',
+        messages,
+        truncated,
+      });
+    } catch (error) {
+      routeError(res, 'consultar faturamento', error);
+    }
+  });
+
   app.get('/api/email/messages/:messageId', requireAdmin, async (req, res) => {
     if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId)) return res.status(400).json({ error: 'Identificador de mensagem inválido.' });
     try {
