@@ -366,7 +366,9 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
         for (const header of headers) detailParams.append('metadataHeaders', header);
         return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
       });
-      const details = await gmailBatchJson(supabase, req.user.id, paths);
+      const details = paths.length
+        ? await gmailBatchJson(supabase, req.user.id, paths)
+        : [];
       details.forEach((detail, index) => { detail.snippet = items[index].snippet; });
       const messages = details.filter(item => !ignoredMessage(item)).map(metadata);
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
