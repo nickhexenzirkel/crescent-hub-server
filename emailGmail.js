@@ -2,6 +2,7 @@ const crypto = require('crypto');
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GMAIL_API_URL = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const GMAIL_BATCH_API_URL = 'https://www.googleapis.com/batch/gmail/v1';
 const TOKEN_KEY_PREFIX = 'gmail_oauth_user_';
 const oauthStates = new Map();
 const refreshes = new Map();
@@ -95,6 +96,53 @@ async function googleJson(accessToken, path) {
   return data;
 }
 
+async function googleBatchJson(accessToken, paths) {
+  const boundary = `batch_${crypto.randomBytes(16).toString('hex')}`;
+  const body = paths.map((path, index) => [
+    `--${boundary}`,
+    'Content-Type: application/http',
+    `Content-ID: <item-${index}>`,
+    '',
+    `GET ${path} HTTP/1.1`,
+    '',
+    '',
+  ].join('\r\n')).join('') + `--${boundary}--\r\n`;
+  const response = await fetch(GMAIL_BATCH_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + accessToken,
+      'Content-Type': `multipart/mixed; boundary=${boundary}`,
+    },
+    body,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', response.status);
+  }
+
+  const responseType = response.headers.get('Content-Type') || '';
+  const responseBoundary = responseType.match(/boundary="?([^";]+)"?/i)?.[1];
+  if (!responseBoundary) throw new Error('O Gmail retornou uma resposta de pesquisa inválida.');
+  const parts = (await response.text()).split(`--${responseBoundary}`).filter(part => /HTTP\/1\.[01]\s+\d{3}/.test(part));
+  const results = new Array(paths.length);
+  for (const [partIndex, part] of parts.entries()) {
+    const contentId = part.match(/Content-ID:\s*<response-item-(\d+)>/i)?.[1];
+    const index = contentId === undefined ? partIndex : Number(contentId);
+    const httpResponse = part.match(/HTTP\/1\.[01]\s+(\d{3})[^\r\n]*\r?\n([\s\S]*)/);
+    if (!httpResponse || index >= paths.length) throw new Error('O Gmail retornou um item inválido na pesquisa.');
+    const status = Number(httpResponse[1]);
+    const jsonStart = httpResponse[2].indexOf('\r\n\r\n');
+    if (jsonStart === -1) throw new Error('O Gmail retornou um item incompleto na pesquisa.');
+    const data = JSON.parse(httpResponse[2].slice(jsonStart + 4).trim());
+    if (status < 200 || status >= 300) {
+      throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', status);
+    }
+    results[index] = data;
+  }
+  if (results.some(result => result === undefined)) throw new Error('O Gmail não retornou todos os resultados da pesquisa.');
+  return results;
+}
+
 async function accessToken(supabase, userId, forceRefresh = false) {
   const account = await loadAccount(supabase, userId);
   if (!account?.refresh_token) {
@@ -139,6 +187,17 @@ async function gmailJson(supabase, userId, path) {
     if (error.status !== 401) throw error;
     credentials = await accessToken(supabase, userId, true);
     return googleJson(credentials.token, path);
+  }
+}
+
+async function gmailBatchJson(supabase, userId, paths) {
+  let credentials = await accessToken(supabase, userId);
+  try {
+    return await googleBatchJson(credentials.token, paths);
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    credentials = await accessToken(supabase, userId, true);
+    return googleBatchJson(credentials.token, paths);
   }
 }
 
@@ -300,14 +359,15 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       const params = new URLSearchParams({ q, maxResults: '20' });
       if (req.query.pageToken) params.set('pageToken', String(req.query.pageToken).slice(0, 1024));
       const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
-      const details = await Promise.all((page.messages || []).map(async item => {
-        const detail = await gmailJson(
-          supabase,
-          req.user.id,
-          `/messages/${encodeURIComponent(item.id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=In-Reply-To&metadataHeaders=References`,
-        );
-        return { ...detail, snippet: item.snippet };
-      }));
+      const items = page.messages || [];
+      const headers = ['From', 'To', 'Subject', 'Date', 'In-Reply-To', 'References'];
+      const paths = items.map(item => {
+        const detailParams = new URLSearchParams({ format: 'metadata' });
+        for (const header of headers) detailParams.append('metadataHeaders', header);
+        return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
+      });
+      const details = await gmailBatchJson(supabase, req.user.id, paths);
+      details.forEach((detail, index) => { detail.snippet = items[index].snippet; });
       const messages = details.filter(item => !ignoredMessage(item)).map(metadata);
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
     } catch (error) {
