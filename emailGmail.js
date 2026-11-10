@@ -8,13 +8,16 @@ const oauthStates = new Map();
 const refreshes = new Map();
 const faturamentoCache = new Map();
 const faturamentoRequests = new Map();
+const faturamentoCooldowns = new Map();
 const FATURAMENTO_CACHE_TTL = 5 * 60 * 1000;
+const FATURAMENTO_COOLDOWN_DEFAULT = 60;
 
 function limparCacheFaturamento(userId) {
   const prefixo = `${String(userId)}:`;
   for (const key of faturamentoCache.keys()) {
     if (key.startsWith(prefixo)) faturamentoCache.delete(key);
   }
+  faturamentoCooldowns.delete(String(userId));
 }
 
 function configurationReady() {
@@ -76,10 +79,30 @@ async function saveAccount(supabase, userId, account) {
 }
 
 class GoogleError extends Error {
-  constructor(message, status) {
+  constructor(message, status, retryAfter = 0) {
     super(message);
     this.status = status;
+    this.retryAfter = retryAfter;
   }
+}
+
+function retryAfterSeconds(response) {
+  const header = response.headers.get('Retry-After');
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.ceil(seconds));
+  const date = Date.parse(header);
+  return Number.isNaN(date) ? 0 : Math.max(0, Math.ceil((date - Date.now()) / 1000));
+}
+
+function isQuotaError(error) {
+  return error.status === 429 || (error.status === 403 && /quota|rate limit/i.test(error.message));
+}
+
+function isValidDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 async function postGoogleForm(url, params) {
@@ -90,7 +113,7 @@ async function postGoogleForm(url, params) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new GoogleError(data.error_description || data.error || 'O Google recusou a solicitação.', response.status);
+    throw new GoogleError(data.error_description || data.error || 'O Google recusou a solicitação.', response.status, retryAfterSeconds(response));
   }
   return data;
 }
@@ -101,7 +124,7 @@ async function googleJson(accessToken, path) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', response.status);
+    throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', response.status, retryAfterSeconds(response));
   }
   return data;
 }
@@ -127,7 +150,7 @@ async function googleBatchJson(accessToken, paths) {
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', response.status);
+    throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', response.status, retryAfterSeconds(response));
   }
 
   const responseType = response.headers.get('Content-Type') || '';
@@ -145,7 +168,7 @@ async function googleBatchJson(accessToken, paths) {
     if (jsonStart === -1) throw new Error('O Gmail retornou um item incompleto na pesquisa.');
     const data = JSON.parse(httpResponse[2].slice(jsonStart + 4).trim());
     if (status < 200 || status >= 300) {
-      throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', status);
+      throw new GoogleError(data.error?.message || 'Não foi possível consultar o Gmail.', status, 0);
     }
     results[index] = data;
   }
@@ -391,20 +414,52 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
   });
 
   app.get('/api/email/faturamento', requireAdmin, async (req, res) => {
-    const month = String(req.query.month || new Date().toISOString().slice(0, 7)).slice(0, 7);
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    const startDate = String(req.query.startDate || '');
+    const endDate = String(req.query.endDate || '');
+    const month = String(req.query.month || (!startDate && !endDate ? new Date().toISOString().slice(0, 7) : '')).slice(0, 7);
+    const usaIntervaloDias = Boolean(startDate || endDate);
+    if (usaIntervaloDias) {
+      if (!startDate || !endDate || !isValidDate(startDate) || !isValidDate(endDate) || endDate < startDate) {
+        return res.status(400).json({ error: 'Informe um intervalo de datas válido para consultar o faturamento.' });
+      }
+      if (month) return res.status(400).json({ error: 'Escolha um mês inteiro ou um intervalo de dias, não os dois.' });
+    } else if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return res.status(400).json({ error: 'Informe um mês válido para consultar o faturamento.' });
+    } else if (!month) {
+      return res.status(400).json({ error: 'Informe o mês ou o intervalo de datas para consultar o faturamento.' });
     }
+    const filterKey = usaIntervaloDias ? `date:${startDate}:${endDate}` : `month:${month}`;
     const pageToken = String(req.query.pageToken || '');
     if (pageToken.length > 1024) {
       return res.status(400).json({ error: 'A página solicitada para o histórico é inválida.' });
     }
 
-    const cacheKey = `${String(req.user.id)}:${month}:${pageToken}`;
+    const userId = String(req.user.id);
+    const cacheKey = `${userId}:${filterKey}:${pageToken}`;
     const cached = faturamentoCache.get(cacheKey);
     if (cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
       return res.json({ ...cached.data, cached: true, cachedAt: new Date(cached.cachedAt).toISOString() });
     }
+
+    const cooldownUntil = faturamentoCooldowns.get(userId) || 0;
+    if (cooldownUntil > Date.now()) {
+      const retryAfter = Math.ceil((cooldownUntil - Date.now()) / 1000);
+      if (cached) {
+        return res.json({
+          ...cached.data,
+          cached: true,
+          stale: true,
+          cachedAt: new Date(cached.cachedAt).toISOString(),
+          warning: 'O Gmail está temporariamente limitado. Exibindo a última sincronização disponível.',
+        });
+      }
+      res.setHeader('Retry-After', String(retryAfter));
+      return res.status(429).json({
+        error: `O Gmail atingiu o limite temporário de consultas. Tente novamente em ${retryAfter} segundos.`,
+        retryAfter,
+      });
+    }
+    if (cooldownUntil) faturamentoCooldowns.delete(userId);
 
     let request = faturamentoRequests.get(cacheKey);
     if (!request) {
@@ -415,9 +470,15 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       }
 
       const [year, monthNumber] = month.split('-').map(Number);
-      const start = `${year}/${String(monthNumber).padStart(2, '0')}/01`;
+      const start = usaIntervaloDias
+        ? startDate.replace(/-/g, '/')
+        : `${year}/${String(monthNumber).padStart(2, '0')}/01`;
       const nextMonth = new Date(Date.UTC(year, monthNumber, 1));
-      const end = `${nextMonth.getUTCFullYear()}/${String(nextMonth.getUTCMonth() + 1).padStart(2, '0')}/${String(nextMonth.getUTCDate()).padStart(2, '0')}`;
+      const endExclusive = usaIntervaloDias
+        ? new Date(`${endDate}T00:00:00.000Z`)
+        : nextMonth;
+      if (usaIntervaloDias) endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+      const end = `${endExclusive.getUTCFullYear()}/${String(endExclusive.getUTCMonth() + 1).padStart(2, '0')}/${String(endExclusive.getUTCDate()).padStart(2, '0')}`;
       const query = `in:sent after:${start} before:${end} {"nota fiscal" "nota fiscal eletrônica" "NF-e" DANFE faturamento refaturamento fatura}`;
       const headers = ['From', 'To', 'Subject', 'Date'];
       const params = new URLSearchParams({ q: query, maxResults: '50' });
@@ -442,6 +503,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
 
       return {
         month,
+        filterKey,
         mailbox: account.email,
         senderName: req.user.name || '',
         messages,
@@ -466,7 +528,16 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       }
       res.json({ ...data, cached: false, cachedAt: new Date(cachedAt).toISOString() });
     } catch (error) {
-      if (cached && (error.status === 429 || (error.status === 403 && /quota|rate limit/i.test(error.message)))) {
+      if (isQuotaError(error)) {
+        const retryAfter = error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT;
+        faturamentoCooldowns.set(userId, Date.now() + retryAfter * 1000);
+        if (faturamentoCooldowns.size > 500) {
+          for (const [key, until] of faturamentoCooldowns) {
+            if (until <= Date.now()) faturamentoCooldowns.delete(key);
+          }
+        }
+      }
+      if (cached && isQuotaError(error)) {
         return res.json({
           ...cached.data,
           cached: true,
@@ -475,9 +546,12 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
           warning: 'O Gmail atingiu o limite temporário de consultas. Exibindo a última sincronização disponível.',
         });
       }
-      if (error.status === 429 || (error.status === 403 && /quota|rate limit/i.test(error.message))) {
+      if (isQuotaError(error)) {
+        const retryAfter = error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT;
+        res.setHeader('Retry-After', String(retryAfter));
         return res.status(429).json({
-          error: 'O Gmail atingiu o limite temporário de consultas. Aguarde alguns minutos antes de tentar sincronizar novamente.',
+          error: `O Gmail atingiu o limite temporário de consultas. Tente novamente em ${retryAfter} segundos.`,
+          retryAfter,
         });
       }
       routeError(res, 'consultar faturamento', error);
