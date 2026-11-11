@@ -9,6 +9,7 @@ const refreshes = new Map();
 const faturamentoCache = new Map();
 const faturamentoRequests = new Map();
 const faturamentoCooldowns = new Map();
+const gmailQueryCooldowns = new Map();
 const FATURAMENTO_CACHE_TTL = 24 * 60 * 60 * 1000;
 const FATURAMENTO_COOLDOWN_DEFAULT = 60;
 
@@ -259,6 +260,24 @@ function walkParts(part, result) {
   for (const child of part.parts || []) walkParts(child, result);
 }
 
+function attachmentsFromParts(part, attachments = []) {
+  if (!part) return attachments;
+  const mimeType = String(part.mimeType || 'application/octet-stream');
+  const filename = part.filename || (mimeType.toLowerCase() === 'application/pdf' ? 'anexo.pdf' : '');
+  if (filename && (part.body?.attachmentId || part.body?.data)) {
+    const attachment = {
+      id: part.body.attachmentId,
+      filename,
+      mimeType,
+      size: Number(part.body.size) || 0,
+    };
+    if (part.body.data && !part.body.attachmentId) attachment.data = part.body.data;
+    attachments.push(attachment);
+  }
+  for (const child of part.parts || []) attachmentsFromParts(child, attachments);
+  return attachments;
+}
+
 function metadata(message) {
   const headers = headerMap(message.payload);
   return {
@@ -283,25 +302,55 @@ function ignoredMessage(message) {
   return isMailsuite || isReply;
 }
 
-function routeError(res, label, error) {
-  const status = error instanceof GoogleError && error.status >= 400 && error.status < 500
+function routeError(res, label, error, userId) {
+  const quotaExceeded = isQuotaError(error);
+  const retryAfter = quotaExceeded ? (error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT) : 0;
+  if (quotaExceeded && userId) {
+    gmailQueryCooldowns.set(String(userId), Date.now() + retryAfter * 1000);
+    if (gmailQueryCooldowns.size > 500) {
+      for (const [id, until] of gmailQueryCooldowns) {
+        if (until <= Date.now()) gmailQueryCooldowns.delete(id);
+      }
+    }
+  }
+  const status = quotaExceeded ? 429 : error instanceof GoogleError && error.status >= 400 && error.status < 500
     ? error.status
     : 502;
   console.error(`[Gmail] ${label}:`, error.message);
+  if (quotaExceeded) res.setHeader('Retry-After', String(retryAfter));
   res.status(status).json({
-    error: status === 401
-      ? 'A autorização do Gmail não está ativa. Conecte a conta novamente.'
-      : error.message || 'Falha ao consultar o Gmail.',
+    error: quotaExceeded
+      ? `O Gmail atingiu o limite temporário de consultas. Tente novamente em ${retryAfter} segundos.`
+      : status === 401
+        ? 'A autorização do Gmail não está ativa. Conecte a conta novamente.'
+        : error.message || 'Falha ao consultar o Gmail.',
+    ...(quotaExceeded ? { retryAfter } : {}),
   });
 }
 
-module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
+function responderSeEmCooldown(userId, res) {
+  const key = String(userId);
+  const until = gmailQueryCooldowns.get(key) || 0;
+  if (until <= Date.now()) {
+    gmailQueryCooldowns.delete(key);
+    return false;
+  }
+  const retryAfter = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+  res.setHeader('Retry-After', String(retryAfter));
+  res.status(429).json({
+    error: `A busca no Gmail está pausada para respeitar a cota. Tente novamente em ${retryAfter} segundos.`,
+    retryAfter,
+  });
+  return true;
+}
+
+module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
   app.use('/api/email', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, private');
     next();
   });
 
-  app.get('/api/email/status', requireAdmin, async (req, res) => {
+  app.get('/api/email/status', requireAuth, async (req, res) => {
     try {
       if (!configurationReady()) return res.json({ configured: false, connected: false });
       const account = await loadAccount(supabase, req.user.id);
@@ -315,7 +364,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
-  app.post('/api/email/oauth/start', requireAdmin, (req, res) => {
+  app.post('/api/email/oauth/start', requireAuth, (req, res) => {
     if (!configurationReady()) {
       return res.status(503).json({ error: 'A integração Gmail precisa ser configurada no servidor.' });
     }
@@ -378,7 +427,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
-  app.delete('/api/email/disconnect', requireAdmin, async (req, res) => {
+  app.delete('/api/email/disconnect', requireAuth, async (req, res) => {
     try {
       const { error } = await supabase.from('settings').delete().eq('key', tokenKey(req.user.id));
       if (error) return routeError(res, 'desconectar conta', error);
@@ -389,31 +438,38 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
-  app.get('/api/email/messages', requireAdmin, async (req, res) => {
+  app.get('/api/email/messages', requireAuth, async (req, res) => {
+    if (req.query.includeAttachments === '1' && responderSeEmCooldown(req.user.id, res)) return;
     try {
       const q = String(req.query.q || 'in:inbox').slice(0, 300);
-      const params = new URLSearchParams({ q, maxResults: '20' });
+      const includeAttachments = req.query.includeAttachments === '1';
+      const params = new URLSearchParams({ q, maxResults: includeAttachments ? '10' : '20' });
       if (req.query.pageToken) params.set('pageToken', String(req.query.pageToken).slice(0, 1024));
       const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
       const items = page.messages || [];
       const headers = ['From', 'To', 'Subject', 'Date', 'In-Reply-To', 'References'];
       const paths = items.map(item => {
-        const detailParams = new URLSearchParams({ format: 'metadata' });
-        for (const header of headers) detailParams.append('metadataHeaders', header);
+        const detailParams = new URLSearchParams({ format: includeAttachments ? 'full' : 'metadata' });
+        if (!includeAttachments) {
+          for (const header of headers) detailParams.append('metadataHeaders', header);
+        }
         return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
       });
       const details = paths.length
         ? await gmailBatchJson(supabase, req.user.id, paths)
         : [];
       details.forEach((detail, index) => { detail.snippet = items[index].snippet; });
-      const messages = details.filter(item => !ignoredMessage(item)).map(metadata);
+      const messages = details.filter(item => !ignoredMessage(item)).map(detail => ({
+        ...metadata(detail),
+        ...(includeAttachments ? { attachments: attachmentsFromParts(detail.payload) } : {}),
+      }));
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
     } catch (error) {
-      routeError(res, 'listar mensagens', error);
+      routeError(res, 'listar mensagens', error, req.user.id);
     }
   });
 
-  app.get('/api/email/faturamento', requireAdmin, async (req, res) => {
+  app.get('/api/email/faturamento', requireAuth, async (req, res) => {
     const startDate = String(req.query.startDate || '');
     const endDate = String(req.query.endDate || '');
     const month = String(req.query.month || (!startDate && !endDate ? new Date().toISOString().slice(0, 7) : '')).slice(0, 7);
@@ -561,7 +617,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
-  app.get('/api/email/messages/:messageId', requireAdmin, async (req, res) => {
+  app.get('/api/email/messages/:messageId', requireAuth, async (req, res) => {
     if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId)) return res.status(400).json({ error: 'Identificador de mensagem inválido.' });
     try {
       const detail = await gmailJson(
@@ -585,7 +641,8 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
     }
   });
 
-  app.get('/api/email/messages/:messageId/attachments/:attachmentId', requireAdmin, async (req, res) => {
+  app.get('/api/email/messages/:messageId/attachments/:attachmentId', requireAuth, async (req, res) => {
+    if (responderSeEmCooldown(req.user.id, res)) return;
     if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId) || !/^[A-Za-z0-9_-]+=*$/.test(req.params.attachmentId)) {
       return res.status(400).json({ error: 'Identificador de anexo inválido.' });
     }
@@ -604,7 +661,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAdmin }) {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.send(Buffer.from(result.data || '', 'base64url'));
     } catch (error) {
-      routeError(res, 'baixar anexo', error);
+      routeError(res, 'baixar anexo', error, req.user.id);
     }
   });
 };
