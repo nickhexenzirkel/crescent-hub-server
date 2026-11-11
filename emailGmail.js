@@ -4,6 +4,8 @@ const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GMAIL_API_URL = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const GMAIL_BATCH_API_URL = 'https://www.googleapis.com/batch/gmail/v1';
 const TOKEN_KEY_PREFIX = 'gmail_oauth_user_';
+const SHARED_TOKEN_KEY = 'gmail_oauth_shared';
+const SHARED_MAILBOX_EMAIL = 'faturamento@7beneficios.com';
 const oauthStates = new Map();
 const refreshes = new Map();
 const faturamentoCache = new Map();
@@ -62,21 +64,43 @@ function tokenKey(userId) {
   return `${TOKEN_KEY_PREFIX}${String(userId)}`;
 }
 
-async function loadAccount(supabase, userId) {
+async function loadAccountByKey(supabase, key) {
   const { data, error } = await supabase
     .from('settings')
     .select('value')
-    .eq('key', tokenKey(userId))
+    .eq('key', key)
     .maybeSingle();
   if (error) throw error;
   return data?.value ? decrypt(data.value) : null;
 }
 
-async function saveAccount(supabase, userId, account) {
+async function loadAccount(supabase, userId) {
+  return loadAccountByKey(supabase, tokenKey(userId));
+}
+
+async function saveAccountByKey(supabase, key, account) {
   const { error } = await supabase
     .from('settings')
-    .upsert({ key: tokenKey(userId), value: encrypt(account) });
+    .upsert({ key, value: encrypt(account) });
   if (error) throw error;
+}
+
+async function saveAccount(supabase, userId, account) {
+  return saveAccountByKey(supabase, tokenKey(userId), account);
+}
+
+async function resolveAccountReference(supabase, userId) {
+  const shared = await loadAccountByKey(supabase, SHARED_TOKEN_KEY);
+  if (shared?.refresh_token && shared.email) {
+    return { key: SHARED_TOKEN_KEY, scope: 'shared', account: shared, shared: true };
+  }
+  const key = tokenKey(userId);
+  return {
+    key,
+    scope: String(userId),
+    account: await loadAccountByKey(supabase, key),
+    shared: false,
+  };
 }
 
 class GoogleError extends Error {
@@ -177,15 +201,14 @@ async function googleBatchJson(accessToken, paths) {
   return results;
 }
 
-async function accessToken(supabase, userId, forceRefresh = false) {
-  const account = await loadAccount(supabase, userId);
+async function accessToken(supabase, accountReference, forceRefresh = false) {
+  const { account, key } = accountReference;
   if (!account?.refresh_token) {
     throw new GoogleError('Conecte uma conta Gmail para continuar.', 401);
   }
   if (!forceRefresh && account.expiry_date > Date.now() + 60_000 && account.access_token) {
     return { account, token: account.access_token };
   }
-  const key = String(userId);
   let refresh = refreshes.get(key);
   if (!refresh) {
     refresh = (async () => {
@@ -201,36 +224,38 @@ async function accessToken(supabase, userId, forceRefresh = false) {
         refresh_token: refreshed.refresh_token || account.refresh_token,
         expiry_date: Date.now() + (Number(refreshed.expires_in) || 3600) * 1000,
       };
-      await saveAccount(supabase, userId, updated);
+      await saveAccountByKey(supabase, key, updated);
       return { account: updated, token: updated.access_token };
     })();
     refreshes.set(key, refresh);
   }
   try {
-    return await refresh;
+    const refreshed = await refresh;
+    accountReference.account = refreshed.account;
+    return refreshed;
   } finally {
     if (refreshes.get(key) === refresh) refreshes.delete(key);
   }
 }
 
-async function gmailJson(supabase, userId, path) {
-  let credentials = await accessToken(supabase, userId);
+async function gmailJson(supabase, accountReference, path) {
+  let credentials = await accessToken(supabase, accountReference);
   try {
     return await googleJson(credentials.token, path);
   } catch (error) {
     if (error.status !== 401) throw error;
-    credentials = await accessToken(supabase, userId, true);
+    credentials = await accessToken(supabase, accountReference, true);
     return googleJson(credentials.token, path);
   }
 }
 
-async function gmailBatchJson(supabase, userId, paths) {
-  let credentials = await accessToken(supabase, userId);
+async function gmailBatchJson(supabase, accountReference, paths) {
+  let credentials = await accessToken(supabase, accountReference);
   try {
     return await googleBatchJson(credentials.token, paths);
   } catch (error) {
     if (error.status !== 401) throw error;
-    credentials = await accessToken(supabase, userId, true);
+    credentials = await accessToken(supabase, accountReference, true);
     return googleBatchJson(credentials.token, paths);
   }
 }
@@ -292,6 +317,14 @@ function metadata(message) {
   };
 }
 
+function personalizarFaturamento(data, senderName) {
+  return {
+    ...data,
+    senderName,
+    messages: (data.messages || []).map(message => ({ ...message, senderName })),
+  };
+}
+
 function ignoredMessage(message) {
   const headers = headerMap(message.payload);
   const sender = String(headers.from || '').toLowerCase();
@@ -302,11 +335,11 @@ function ignoredMessage(message) {
   return isMailsuite || isReply;
 }
 
-function routeError(res, label, error, userId) {
+function routeError(res, label, error, scopeKey) {
   const quotaExceeded = isQuotaError(error);
   const retryAfter = quotaExceeded ? (error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT) : 0;
-  if (quotaExceeded && userId) {
-    gmailQueryCooldowns.set(String(userId), Date.now() + retryAfter * 1000);
+  if (quotaExceeded && scopeKey) {
+    gmailQueryCooldowns.set(String(scopeKey), Date.now() + retryAfter * 1000);
     if (gmailQueryCooldowns.size > 500) {
       for (const [id, until] of gmailQueryCooldowns) {
         if (until <= Date.now()) gmailQueryCooldowns.delete(id);
@@ -353,18 +386,46 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
   app.get('/api/email/status', requireAuth, async (req, res) => {
     try {
       if (!configurationReady()) return res.json({ configured: false, connected: false });
-      const account = await loadAccount(supabase, req.user.id);
+      const accountReference = await resolveAccountReference(supabase, req.user.id);
+      const account = accountReference.account;
       res.json({
         configured: true,
         connected: Boolean(account?.refresh_token && account.email),
         email: account?.email || '',
+        shared: accountReference.shared,
+        canShareAccount: !accountReference.shared
+          && req.user.role === 'admin'
+          && account?.email?.toLowerCase() === SHARED_MAILBOX_EMAIL,
       });
     } catch (error) {
       routeError(res, 'status', error);
     }
   });
 
+  app.post('/api/email/shared-account', requireAuth, async (req, res) => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Somente administradores podem definir a caixa institucional.' });
+    }
+    try {
+      const account = await loadAccount(supabase, req.user.id);
+      if (account?.email?.toLowerCase() !== SHARED_MAILBOX_EMAIL || !account.refresh_token) {
+        return res.status(409).json({
+          error: `Conecte primeiro a conta ${SHARED_MAILBOX_EMAIL} neste usuário administrador.`,
+        });
+      }
+      await saveAccountByKey(supabase, SHARED_TOKEN_KEY, account);
+      limparCacheFaturamento('shared');
+      gmailQueryCooldowns.delete('shared');
+      res.json({ ok: true, email: account.email });
+    } catch (error) {
+      routeError(res, 'compartilhar caixa institucional', error);
+    }
+  });
+
   app.post('/api/email/oauth/start', requireAuth, (req, res) => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Somente administradores podem conectar a caixa institucional.' });
+    }
     if (!configurationReady()) {
       return res.status(503).json({ error: 'A integração Gmail precisa ser configurada no servidor.' });
     }
@@ -439,13 +500,16 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
   });
 
   app.get('/api/email/messages', requireAuth, async (req, res) => {
-    if (req.query.includeAttachments === '1' && responderSeEmCooldown(req.user.id, res)) return;
+    let scopeKey = String(req.user.id);
     try {
+      const accountReference = await resolveAccountReference(supabase, req.user.id);
+      scopeKey = accountReference.scope;
+      if (req.query.includeAttachments === '1' && responderSeEmCooldown(accountReference.scope, res)) return;
       const q = String(req.query.q || 'in:inbox').slice(0, 300);
       const includeAttachments = req.query.includeAttachments === '1';
       const params = new URLSearchParams({ q, maxResults: includeAttachments ? '10' : '20' });
       if (req.query.pageToken) params.set('pageToken', String(req.query.pageToken).slice(0, 1024));
-      const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
+      const page = await gmailJson(supabase, accountReference, `/messages?${params}`);
       const items = page.messages || [];
       const headers = ['From', 'To', 'Subject', 'Date', 'In-Reply-To', 'References'];
       const paths = items.map(item => {
@@ -456,7 +520,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
       });
       const details = paths.length
-        ? await gmailBatchJson(supabase, req.user.id, paths)
+        ? await gmailBatchJson(supabase, accountReference, paths)
         : [];
       details.forEach((detail, index) => { detail.snippet = items[index].snippet; });
       const messages = details.filter(item => !ignoredMessage(item)).map(detail => ({
@@ -465,7 +529,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       }));
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
     } catch (error) {
-      routeError(res, 'listar mensagens', error, req.user.id);
+      routeError(res, 'listar mensagens', error, scopeKey);
     }
   });
 
@@ -491,19 +555,31 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       return res.status(400).json({ error: 'A página solicitada para o histórico é inválida.' });
     }
 
-    const userId = String(req.user.id);
-    const cacheKey = `${userId}:${filterKey}:${pageToken}`;
-    const cached = faturamentoCache.get(cacheKey);
-    if (!forcarAtualizacao && cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
-      return res.json({ ...cached.data, cached: true, cachedAt: new Date(cached.cachedAt).toISOString() });
+    let accountReference;
+    try {
+      accountReference = await resolveAccountReference(supabase, req.user.id);
+    } catch (error) {
+      routeError(res, 'consultar faturamento', error, String(req.user.id));
+      return;
     }
 
-    const cooldownUntil = faturamentoCooldowns.get(userId) || 0;
+    const scopeKey = accountReference.scope;
+    const cacheKey = `${scopeKey}:${filterKey}:${pageToken}`;
+    const cached = faturamentoCache.get(cacheKey);
+    if (!forcarAtualizacao && cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
+      return res.json({
+        ...personalizarFaturamento(cached.data, req.user.name || ''),
+        cached: true,
+        cachedAt: new Date(cached.cachedAt).toISOString(),
+      });
+    }
+
+    const cooldownUntil = faturamentoCooldowns.get(scopeKey) || 0;
     if (cooldownUntil > Date.now()) {
       const retryAfter = Math.ceil((cooldownUntil - Date.now()) / 1000);
       if (cached) {
         return res.json({
-          ...cached.data,
+          ...personalizarFaturamento(cached.data, req.user.name || ''),
           cached: true,
           stale: true,
           cachedAt: new Date(cached.cachedAt).toISOString(),
@@ -516,14 +592,14 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         retryAfter,
       });
     }
-    if (cooldownUntil) faturamentoCooldowns.delete(userId);
+    if (cooldownUntil) faturamentoCooldowns.delete(scopeKey);
 
     let request = faturamentoRequests.get(cacheKey);
     if (!request) {
       request = (async () => {
-      const account = await loadAccount(supabase, req.user.id);
+      const account = accountReference.account;
       if (!account?.refresh_token || !account.email) {
-        throw new GoogleError('Conecte uma conta Gmail para consultar o faturamento.', 401);
+        throw new GoogleError('A caixa Gmail institucional ainda não está conectada.', 401);
       }
 
       const [year, monthNumber] = month.split('-').map(Number);
@@ -540,7 +616,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       const headers = ['From', 'To', 'Subject', 'Date'];
       const params = new URLSearchParams({ q: query, maxResults: '50' });
       if (pageToken) params.set('pageToken', pageToken);
-      const page = await gmailJson(supabase, req.user.id, `/messages?${params}`);
+      const page = await gmailJson(supabase, accountReference, `/messages?${params}`);
       const items = page.messages || [];
       const paths = items.map(item => {
         const detailParams = new URLSearchParams({ format: 'metadata' });
@@ -548,7 +624,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         return `/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`;
       });
       const details = paths.length
-        ? await gmailBatchJson(supabase, req.user.id, paths)
+        ? await gmailBatchJson(supabase, accountReference, paths)
         : [];
       details.forEach((detail, index) => { detail.snippet = items[index].snippet || ''; });
       const messages = details
@@ -583,11 +659,15 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
           faturamentoCache.delete(faturamentoCache.keys().next().value);
         }
       }
-      res.json({ ...data, cached: false, cachedAt: new Date(cachedAt).toISOString() });
+      res.json({
+        ...personalizarFaturamento(data, req.user.name || ''),
+        cached: false,
+        cachedAt: new Date(cachedAt).toISOString(),
+      });
     } catch (error) {
       if (isQuotaError(error)) {
         const retryAfter = error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT;
-        faturamentoCooldowns.set(userId, Date.now() + retryAfter * 1000);
+        faturamentoCooldowns.set(scopeKey, Date.now() + retryAfter * 1000);
         if (faturamentoCooldowns.size > 500) {
           for (const [key, until] of faturamentoCooldowns) {
             if (until <= Date.now()) faturamentoCooldowns.delete(key);
@@ -596,7 +676,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       }
       if (cached && isQuotaError(error)) {
         return res.json({
-          ...cached.data,
+          ...personalizarFaturamento(cached.data, req.user.name || ''),
           cached: true,
           stale: true,
           cachedAt: new Date(cached.cachedAt).toISOString(),
@@ -611,7 +691,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
           retryAfter,
         });
       }
-      routeError(res, 'consultar faturamento', error);
+      routeError(res, 'consultar faturamento', error, scopeKey);
     } finally {
       if (faturamentoRequests.get(cacheKey) === request) faturamentoRequests.delete(cacheKey);
     }
@@ -619,10 +699,13 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
 
   app.get('/api/email/messages/:messageId', requireAuth, async (req, res) => {
     if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId)) return res.status(400).json({ error: 'Identificador de mensagem inválido.' });
+    let scopeKey = String(req.user.id);
     try {
+      const accountReference = await resolveAccountReference(supabase, req.user.id);
+      scopeKey = accountReference.scope;
       const detail = await gmailJson(
         supabase,
-        req.user.id,
+        accountReference,
         `/messages/${encodeURIComponent(req.params.messageId)}?format=full`,
       );
       const content = { text: '', html: '', attachments: [] };
@@ -637,19 +720,22 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         attachments: content.attachments,
       });
     } catch (error) {
-      routeError(res, 'abrir mensagem', error);
+      routeError(res, 'abrir mensagem', error, scopeKey);
     }
   });
 
   app.get('/api/email/messages/:messageId/attachments/:attachmentId', requireAuth, async (req, res) => {
-    if (responderSeEmCooldown(req.user.id, res)) return;
     if (!/^[A-Za-z0-9_-]+$/.test(req.params.messageId) || !/^[A-Za-z0-9_-]+=*$/.test(req.params.attachmentId)) {
       return res.status(400).json({ error: 'Identificador de anexo inválido.' });
     }
+    let scopeKey = String(req.user.id);
     try {
+      const accountReference = await resolveAccountReference(supabase, req.user.id);
+      scopeKey = accountReference.scope;
+      if (responderSeEmCooldown(scopeKey, res)) return;
       const result = await gmailJson(
         supabase,
-        req.user.id,
+        accountReference,
         `/messages/${encodeURIComponent(req.params.messageId)}/attachments/${encodeURIComponent(req.params.attachmentId)}`,
       );
       const filename = String(req.query.filename || 'anexo').replace(/[\r\n"]/g, '_');
@@ -661,7 +747,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.send(Buffer.from(result.data || '', 'base64url'));
     } catch (error) {
-      routeError(res, 'baixar anexo', error, req.user.id);
+      routeError(res, 'baixar anexo', error, scopeKey);
     }
   });
 };
