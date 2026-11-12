@@ -308,6 +308,7 @@ function metadata(message) {
   return {
     id: message.id,
     threadId: message.threadId,
+    internalDate: message.internalDate || '',
     labelIds: message.labelIds || [],
     snippet: message.snippet || '',
     from: headers.from || '',
