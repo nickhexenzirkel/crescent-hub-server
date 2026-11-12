@@ -325,14 +325,14 @@ function personalizarFaturamento(data, senderName) {
   };
 }
 
-function ignoredMessage(message) {
+function ignoredMessage(message, { includeReplies = false } = {}) {
   const headers = headerMap(message.payload);
   const sender = String(headers.from || '').toLowerCase();
   const subject = String(headers.subject || '').trim().toLowerCase();
   const isMailsuite = /mailsuite|mail[\s._-]*track/.test(`${sender} ${subject}`);
   const isReply = Boolean(headers['in-reply-to'] || headers.references)
     || /^(re|res|fw|fwd)\s*:/i.test(subject);
-  return isMailsuite || isReply;
+  return isMailsuite || (!includeReplies && isReply);
 }
 
 function routeError(res, label, error, scopeKey) {
@@ -507,6 +507,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       if (req.query.includeAttachments === '1' && responderSeEmCooldown(accountReference.scope, res)) return;
       const q = String(req.query.q || 'in:inbox').slice(0, 300);
       const includeAttachments = req.query.includeAttachments === '1';
+      const includeReplies = req.query.includeReplies === '1';
       const params = new URLSearchParams({ q, maxResults: includeAttachments ? '10' : '20' });
       if (req.query.pageToken) params.set('pageToken', String(req.query.pageToken).slice(0, 1024));
       const page = await gmailJson(supabase, accountReference, `/messages?${params}`);
@@ -523,7 +524,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         ? await gmailBatchJson(supabase, accountReference, paths)
         : [];
       details.forEach((detail, index) => { detail.snippet = items[index].snippet; });
-      const messages = details.filter(item => !ignoredMessage(item)).map(detail => ({
+      const messages = details.filter(item => !ignoredMessage(item, { includeReplies })).map(detail => ({
         ...metadata(detail),
         ...(includeAttachments ? { attachments: attachmentsFromParts(detail.payload) } : {}),
       }));
