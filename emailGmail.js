@@ -13,7 +13,7 @@ const faturamentoRequests = new Map();
 const gmailQueryCooldowns = new Map();
 const gmailQuotaFailures = new Map();
 const FATURAMENTO_CACHE_TTL = 24 * 60 * 60 * 1000;
-const FATURAMENTO_CACHE_FRESH_TTL = 4 * 60 * 1000;
+const FATURAMENTO_CACHE_FRESH_TTL = 11 * 60 * 1000;
 const GMAIL_QUOTA_COOLDOWN_DEFAULT = 60;
 const GMAIL_QUOTA_COOLDOWN_MAX = 15 * 60;
 
