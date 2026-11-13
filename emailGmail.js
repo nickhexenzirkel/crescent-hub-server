@@ -10,42 +10,48 @@ const oauthStates = new Map();
 const refreshes = new Map();
 const faturamentoCache = new Map();
 const faturamentoRequests = new Map();
-const faturamentoCooldowns = new Map();
-const faturamentoQuotaFailures = new Map();
 const gmailQueryCooldowns = new Map();
+const gmailQuotaFailures = new Map();
 const FATURAMENTO_CACHE_TTL = 24 * 60 * 60 * 1000;
 const FATURAMENTO_CACHE_FRESH_TTL = 14 * 60 * 1000;
-const FATURAMENTO_COOLDOWN_DEFAULT = 60;
-const FATURAMENTO_COOLDOWN_MAX = 15 * 60;
+const GMAIL_QUOTA_COOLDOWN_DEFAULT = 60;
+const GMAIL_QUOTA_COOLDOWN_MAX = 15 * 60;
 
 function limparCacheFaturamento(userId) {
   const prefixo = `${String(userId)}:`;
   for (const key of faturamentoCache.keys()) {
     if (key.startsWith(prefixo)) faturamentoCache.delete(key);
   }
-  faturamentoCooldowns.delete(String(userId));
-  faturamentoQuotaFailures.delete(String(userId));
+  gmailQueryCooldowns.delete(String(userId));
+  gmailQuotaFailures.delete(String(userId));
 }
 
-function iniciarCooldownFaturamento(scopeKey, retryAfter = 0) {
+function iniciarCooldownGmail(scopeKey, retryAfter = 0) {
   const key = String(scopeKey);
-  const tentativas = (faturamentoQuotaFailures.get(key) || 0) + 1;
-  faturamentoQuotaFailures.set(key, tentativas);
+  const tentativas = (gmailQuotaFailures.get(key) || 0) + 1;
+  gmailQuotaFailures.set(key, tentativas);
   const esperaExponencial = Math.min(
-    FATURAMENTO_COOLDOWN_MAX,
-    FATURAMENTO_COOLDOWN_DEFAULT * (2 ** Math.min(tentativas - 1, 10)),
+    GMAIL_QUOTA_COOLDOWN_MAX,
+    GMAIL_QUOTA_COOLDOWN_DEFAULT * (2 ** Math.min(tentativas - 1, 10)),
   );
   const espera = Math.max(esperaExponencial, Number(retryAfter) || 0);
-  faturamentoCooldowns.set(key, Date.now() + espera * 1000);
-  if (faturamentoCooldowns.size > 500) {
-    for (const [id, until] of faturamentoCooldowns) {
+  gmailQueryCooldowns.set(key, Date.now() + espera * 1000);
+  if (gmailQueryCooldowns.size > 500) {
+    for (const [id, until] of gmailQueryCooldowns) {
       if (until <= Date.now()) {
-        faturamentoCooldowns.delete(id);
-        faturamentoQuotaFailures.delete(id);
+        gmailQueryCooldowns.delete(id);
+        gmailQuotaFailures.delete(id);
       }
     }
   }
   return espera;
+}
+
+function limparCooldownGmail(scopeKey) {
+  const key = String(scopeKey);
+  if ((gmailQueryCooldowns.get(key) || 0) > Date.now()) return;
+  gmailQueryCooldowns.delete(key);
+  gmailQuotaFailures.delete(key);
 }
 
 function configurationReady() {
@@ -363,15 +369,9 @@ function ignoredMessage(message, { includeReplies = false } = {}) {
 
 function routeError(res, label, error, scopeKey) {
   const quotaExceeded = isQuotaError(error);
-  const retryAfter = quotaExceeded ? (error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT) : 0;
-  if (quotaExceeded && scopeKey) {
-    gmailQueryCooldowns.set(String(scopeKey), Date.now() + retryAfter * 1000);
-    if (gmailQueryCooldowns.size > 500) {
-      for (const [id, until] of gmailQueryCooldowns) {
-        if (until <= Date.now()) gmailQueryCooldowns.delete(id);
-      }
-    }
-  }
+  const retryAfter = quotaExceeded && scopeKey
+    ? iniciarCooldownGmail(scopeKey, error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT)
+    : 0;
   const status = quotaExceeded ? 429 : error instanceof GoogleError && error.status >= 400 && error.status < 500
     ? error.status
     : 502;
@@ -530,7 +530,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
     try {
       const accountReference = await resolveAccountReference(supabase, req.user.id);
       scopeKey = accountReference.scope;
-      if (req.query.includeAttachments === '1' && responderSeEmCooldown(accountReference.scope, res)) return;
+      if (responderSeEmCooldown(scopeKey, res)) return;
       const q = String(req.query.q || 'in:inbox').slice(0, 300);
       const includeAttachments = req.query.includeAttachments === '1';
       const includeReplies = req.query.includeReplies === '1';
@@ -555,6 +555,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         ...(includeAttachments ? { attachments: attachmentsFromParts(detail.payload) } : {}),
       }));
       res.json({ messages, nextPageToken: page.nextPageToken || '' });
+      limparCooldownGmail(scopeKey);
     } catch (error) {
       routeError(res, 'listar mensagens', error, scopeKey);
     }
@@ -601,7 +602,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       });
     }
 
-    const cooldownUntil = faturamentoCooldowns.get(scopeKey) || 0;
+    const cooldownUntil = gmailQueryCooldowns.get(scopeKey) || 0;
     if (cooldownUntil > Date.now()) {
       const retryAfter = Math.ceil((cooldownUntil - Date.now()) / 1000);
       if (cached) {
@@ -619,7 +620,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         retryAfter,
       });
     }
-    if (cooldownUntil) faturamentoCooldowns.delete(scopeKey);
+    if (cooldownUntil) gmailQueryCooldowns.delete(scopeKey);
 
     let request = faturamentoRequests.get(cacheKey);
     if (!request) {
@@ -676,8 +677,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
 
     try {
       const data = await request;
-      faturamentoCooldowns.delete(scopeKey);
-      faturamentoQuotaFailures.delete(scopeKey);
+      limparCooldownGmail(scopeKey);
       const cachedAt = Date.now();
       faturamentoCache.set(cacheKey, { data, cachedAt });
       if (faturamentoCache.size > 500) {
@@ -695,7 +695,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       });
     } catch (error) {
       const retryAfter = isQuotaError(error)
-        ? iniciarCooldownFaturamento(scopeKey, error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT)
+        ? iniciarCooldownGmail(scopeKey, error.retryAfter || GMAIL_QUOTA_COOLDOWN_DEFAULT)
         : 0;
       if (cached && isQuotaError(error)) {
         return res.json({
@@ -725,6 +725,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
     try {
       const accountReference = await resolveAccountReference(supabase, req.user.id);
       scopeKey = accountReference.scope;
+      if (responderSeEmCooldown(scopeKey, res)) return;
       const detail = await gmailJson(
         supabase,
         accountReference,
@@ -741,6 +742,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         bodyHtml: content.html,
         attachments: content.attachments,
       });
+      limparCooldownGmail(scopeKey);
     } catch (error) {
       routeError(res, 'abrir mensagem', error, scopeKey);
     }
@@ -768,6 +770,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
       res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodedFilename}`);
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.send(Buffer.from(result.data || '', 'base64url'));
+      limparCooldownGmail(scopeKey);
     } catch (error) {
       routeError(res, 'baixar anexo', error, scopeKey);
     }
