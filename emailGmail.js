@@ -11,9 +11,12 @@ const refreshes = new Map();
 const faturamentoCache = new Map();
 const faturamentoRequests = new Map();
 const faturamentoCooldowns = new Map();
+const faturamentoQuotaFailures = new Map();
 const gmailQueryCooldowns = new Map();
 const FATURAMENTO_CACHE_TTL = 24 * 60 * 60 * 1000;
+const FATURAMENTO_CACHE_FRESH_TTL = 14 * 60 * 1000;
 const FATURAMENTO_COOLDOWN_DEFAULT = 60;
+const FATURAMENTO_COOLDOWN_MAX = 15 * 60;
 
 function limparCacheFaturamento(userId) {
   const prefixo = `${String(userId)}:`;
@@ -21,6 +24,28 @@ function limparCacheFaturamento(userId) {
     if (key.startsWith(prefixo)) faturamentoCache.delete(key);
   }
   faturamentoCooldowns.delete(String(userId));
+  faturamentoQuotaFailures.delete(String(userId));
+}
+
+function iniciarCooldownFaturamento(scopeKey, retryAfter = 0) {
+  const key = String(scopeKey);
+  const tentativas = (faturamentoQuotaFailures.get(key) || 0) + 1;
+  faturamentoQuotaFailures.set(key, tentativas);
+  const esperaExponencial = Math.min(
+    FATURAMENTO_COOLDOWN_MAX,
+    FATURAMENTO_COOLDOWN_DEFAULT * (2 ** Math.min(tentativas - 1, 10)),
+  );
+  const espera = Math.max(esperaExponencial, Number(retryAfter) || 0);
+  faturamentoCooldowns.set(key, Date.now() + espera * 1000);
+  if (faturamentoCooldowns.size > 500) {
+    for (const [id, until] of faturamentoCooldowns) {
+      if (until <= Date.now()) {
+        faturamentoCooldowns.delete(id);
+        faturamentoQuotaFailures.delete(id);
+      }
+    }
+  }
+  return espera;
 }
 
 function configurationReady() {
@@ -568,7 +593,7 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
     const scopeKey = accountReference.scope;
     const cacheKey = `${scopeKey}:${filterKey}:${pageToken}`;
     const cached = faturamentoCache.get(cacheKey);
-    if (!forcarAtualizacao && cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_TTL) {
+    if (!forcarAtualizacao && cached && Date.now() - cached.cachedAt < FATURAMENTO_CACHE_FRESH_TTL) {
       return res.json({
         ...personalizarFaturamento(cached.data, req.user.name || ''),
         cached: true,
@@ -651,6 +676,8 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
 
     try {
       const data = await request;
+      faturamentoCooldowns.delete(scopeKey);
+      faturamentoQuotaFailures.delete(scopeKey);
       const cachedAt = Date.now();
       faturamentoCache.set(cacheKey, { data, cachedAt });
       if (faturamentoCache.size > 500) {
@@ -667,15 +694,9 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         cachedAt: new Date(cachedAt).toISOString(),
       });
     } catch (error) {
-      if (isQuotaError(error)) {
-        const retryAfter = error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT;
-        faturamentoCooldowns.set(scopeKey, Date.now() + retryAfter * 1000);
-        if (faturamentoCooldowns.size > 500) {
-          for (const [key, until] of faturamentoCooldowns) {
-            if (until <= Date.now()) faturamentoCooldowns.delete(key);
-          }
-        }
-      }
+      const retryAfter = isQuotaError(error)
+        ? iniciarCooldownFaturamento(scopeKey, error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT)
+        : 0;
       if (cached && isQuotaError(error)) {
         return res.json({
           ...personalizarFaturamento(cached.data, req.user.name || ''),
@@ -686,7 +707,6 @@ module.exports = function registerEmailRoutes(app, { supabase, requireAuth }) {
         });
       }
       if (isQuotaError(error)) {
-        const retryAfter = error.retryAfter || FATURAMENTO_COOLDOWN_DEFAULT;
         res.setHeader('Retry-After', String(retryAfter));
         return res.status(429).json({
           error: `O Gmail atingiu o limite temporário de consultas. Tente novamente em ${retryAfter} segundos.`,
